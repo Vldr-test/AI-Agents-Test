@@ -4,6 +4,7 @@ import json
 import json5
 from json_repair import repair_json
 import re
+import inspect
 from pprint import pprint
 from dotenv import load_dotenv
 import logging
@@ -14,8 +15,9 @@ from langchain_openai import ChatOpenAI
 from crewai.llm import LLM as CrewAILLM
 from pydantic import BaseModel, RootModel, ValidationError  
 import asyncio
-from typing import Type, List, Dict, Union, Optional
-from langchain.output_parsers import PydanticOutputParser, OutputFixingParser
+from typing import Type, List, Dict, Optional
+
+# from langchain.output_parsers import PydanticOutputParser, OutputFixingParser
 
 
 #**********************************************************************************************************************
@@ -24,7 +26,7 @@ from langchain.output_parsers import PydanticOutputParser, OutputFixingParser
 
 VERBOSE = False
 
-LOG_LEVEL=logging.WARNING
+LOG_LEVEL=logging.INFO
 os.environ["CREWAI_SUPPRESS_TELEMETRY"] = "true"  # CrewAI telemetry off
 os.environ["LITELLM_SUPPRESS_LOGGING"] = "true"   # LiteLLM debug logs off
 
@@ -39,6 +41,8 @@ llm_logger.setLevel(LOG_LEVEL)  # Set to WARNING to reduce noise
 crew_logger = logging.getLogger("crewai")
 crew_logger.setLevel(LOG_LEVEL)
 
+# will be used to report current function name: my_name()
+my_name = lambda: inspect.currentframe().f_back.f_code.co_name
 
 #**********************************************************************************************************************
 #************************************************** CONFIGURATIONS ****************************************************
@@ -48,21 +52,28 @@ crew_logger.setLevel(LOG_LEVEL)
 # Global definition of a leader
 LEADER_MODEL = "gpt-4" # "gpt-3.5-turbo"  # Can be changed to any model
 
+LEADER_BASE_NAME = "LEAD" 
+AGENT_BASE_NAME = "AGNT"   
+
 # These are the names of models we would like to use for generating responses (and later, peer reviews)
 AGENT_MODELS = [
     # "gpt-4",
     "gpt-3.5-turbo",
-    "anthropic/claude-3-haiku-20240307",  # Updated model name
-    "gemini/gemini-2.0-flash",
+    "anthropic/claude-3-haiku-20240307",    # this format is required 
+    "gemini/gemini-2.0-flash",              # this format is required 
     "xai/grok"
 ]
+
 
 MODEL_PROVIDER_MAP = {
     "gpt-": "openai",
     "gemini/": "google",
     "anthropic/": "anthropic",
     "xai/": "xai"
+    # in future, add DeepSeek, etc.
 }
+
+
 
 LLM_PROVIDERS = {
     "openai": {"api_key": os.getenv("OPENAI_API_KEY"), "env_var": "OPENAI_API_KEY", "llm_class": ChatOpenAI, "temperature": 0.7},
@@ -82,9 +93,6 @@ QUERY_TYPES = {
 }
 
 SELF_REVIEW = False    # if set to True, agents will review their own work :) 
-
-
-INVALID_JSON_STR = "Invalid JSON:"
 
 #================================================= DATA STRUCTURES ======================================================
 
@@ -108,14 +116,11 @@ class InnerPeerReviewFormat(BaseModel):
   improvement_points: List[str]
   score: int 
 
-# this is what we expect from the LLM output, EXCEPT the "reviews" keyword. LLM will return only the Dict!
-class RawPeerReviewOutput(BaseModel):
-    reviews: Dict[str, InnerPeerReviewFormat] = {}
-
 
 class PeerReviewFormat(BaseModel):
     agent_name: str
-    reviews: Dict[str, InnerPeerReviewFormat]
+    reviews: Dict[str,          # peer_name
+        InnerPeerReviewFormat]
 
 #-------------------------------------------------------------------------------------------------------------------------
 
@@ -139,20 +144,6 @@ class FinalResponseFormat(BaseModel):
 
 
 #****************************************** PROMPTS FOR ALL TASKS ************************************************
-
-"""
-def get_analysis_prompt(query, format = QueryAnalysisFormat):
-
-    format_instructions = format.schema_json(indent=2)
-    
-    return (
-        f"Classify the query '{query}' into EXACTLY one of these types: [{', '.join(QUERY_TYPES.keys())}]. "
-        f"If the query falls in between these types, select the one that is the best." 
-        f"Return a filled in JSON object that matches this schema: {format_instructions}"
-        f"For the field 'recommended_tools' generate a list of those LangChain tools that will help answer the query, or an empty list if none" 
-        f"Don't include any text or markers, and don't copy the schema."
-    )
-"""
 
 def get_analysis_prompt(query, format=QueryAnalysisFormat):
     # Don't include schema_json directly—use a description instead
@@ -183,7 +174,7 @@ def get_peer_review_prompt(query, responses, criteria):
         f"  - 'improvement_points': a list of 2-5 full-sentence improvement suggestions.\n"
         f"  - 'score': an integer from 1 (lowest) to 10 (highest), fair but harsh.\n"
         f"Return ONLY the JSON object, no extra text.\n"
-        f"If you don’t understand, return just the word 'PANIC' and nothing else."
+        f"**No prose, no explanations, no extra text outside the JSON.** "
     )
 
 
@@ -204,12 +195,43 @@ def get_final_response_prompt(agent_names, query, peer_reviews, criteria):
 #*************************************************** HELPER FUNCTIONS  ************************************************
 #**********************************************************************************************************************
 
+# handles working with model, provider, and agent's name. Returns: provide, name
+def create_agent_name(model_name, base_name=""):
+    provider_name = next((prov for prefix, prov in MODEL_PROVIDER_MAP.items() if model_name.startswith(prefix)), None)
+    if not provider_name:
+        logging.error(f"Unknown provider for model: {model_name}")
+        return None, None
+    return provider_name, f'{base_name}-{provider_name.upper()}-{model_name}' 
+
+def short_name(agent_name):
+    """Extracts the short model name from a full agent name"""
+    short_model_name = agent_name
+
+# ---- CHANGES ----
+    # Extract model part based on AGENT_BASE_NAME (e.g., "AGNT-")
+    if agent_name.startswith(AGENT_BASE_NAME):
+        # Split on "-" and take the model part (after provider)
+        parts = agent_name.split("-", 2)  # Max 3 parts: AGNT, PROVIDER, MODEL
+        if len(parts) > 2:
+            short_model_name = parts[2]  # e.g., "gpt-3.5-turbo", "anthropic/claude-3-haiku-20240307"
+    
+    # Clean up provider prefixes with "/" (e.g., "anthropic/claude-3-haiku-20240307" -> "claude-3-haiku-20240307")
+    short_model_name = short_model_name.split("/")[-1]
+    
+    # Remove trailing version digits (e.g., "20240307" from "claude-3-haiku-20240307")
+    short_model_name = re.sub(r'-\d+$', '', short_model_name)  # Matches "-20240307", not "3.5"
+    
+    # Remove trailing "-" if present (e.g., "claude-3-haiku-" -> "claude-3-haiku")
+    short_model_name = short_model_name.rstrip("-")
+
+    return short_model_name
+
 
 #--------------------------------------------------- CREATE_AGENT_FROM_NAME() -------------------------------------------
 #  Accepts model_name. Returns an initialized agent + a unique name
 def create_agent_from_name(model_name, base_name=""):
-    # find a provider:
-    provider = next((prov for prefix, prov in MODEL_PROVIDER_MAP.items() if model_name.startswith(prefix)), None)
+    # find a provider and the name for the agent:
+    provider, agent_name = create_agent_name(model_name, base_name)
     if not provider:
         logging.error(f"Unknown provider for model: {model_name}")
         return None, None
@@ -231,13 +253,11 @@ def create_agent_from_name(model_name, base_name=""):
             tools=[]
         )
 
-        agent_name = base_name + "-" + provider.upper() + "-" + model_name.replace('/', '-')
-
         # Crew expects one more attribure, apparently:
         agent.config = {}  # Add at the start of the class if not initialized
         agent.config[agent_name] =  {}
 
-        logging.info(f"Initialized agent {agent_name} with model: {model_name}")
+        logging.info(f"{my_name()}: Initialized agent {agent_name} with model: {model_name}")
         return agent, agent_name
 
     except Exception as e:
@@ -291,155 +311,125 @@ async def exec_async(agents, agent_names, prompt, expected_output):
         tasks.append(asyncio.create_task(pseudo_crew.kickoff_async()))
         logging.info(f"pseudo-crew launched for {agent_name}") 
      
-    # "for" loop ends
-    results = await asyncio.gather(*tasks)
+    # "for" loop ends. IMPROVEMENT: has to be done for each agent separately, not to waste all responses when one fails
+    results_with_exceptions = await asyncio.gather(*tasks, return_exceptions=True)
+    results = []
+    for i, result in enumerate(results_with_exceptions):
+        if isinstance(result, Exception):
+            logging.error(f"{my_name()}: Task {i} raised an exception: {result}")
+        else:
+            results.append(result)
+         
     logging.info(f"Aysnc peer review Generated results: {len(results)} items - {[r.tasks_output[0].raw[:50] for r in results]}")
     return results
 
 #---------------------------------------------- PARSING and VALIDATION  --------------------------------------------------------
 
-def pydantic_from_str(llm_output: str, Pydantic_format: Optional[Type[BaseModel]] = None, llm=None):
+def dict_from_str(llm_output: str, Pydantic_format: Optional[Type[BaseModel]] = None):
     """
-    Tries to turn an LLM's output (a string) into a valid Pydantic object or a clean JSON string.
-    Logs the original output for debugging purposes.
-
+    Tries to turn an LLM's output (a string) into a valid dict and validate it with a Pydantic objmodel if provided.
     Args:
         llm_output: The raw string from an LLM (could be JSON, could be messy).
-        Pydantic_format: The Pydantic model we want to parse into (optional).
-        llm: An LLM instance for fixing bad output (optional, e.g., the leader's LLM).
-
-    Returns: a valid Pydantic object OR None if the object has been passed
-             a valid json string OR {Invalid JSON}+llm_output if there is no Pydantic object
+        Pydantic_format: The Pydantic model we want to use for validation (optional).
+    Returns: a valid dict validated with Pydantic (but NOT pydantic:) OR None  
     """
+ 
+    json_obj = json_to_dict(llm_output) # Try to fix the JSON string and get the parsed JSON object
+    if json_obj is None:
+        logging.error(f"{my_name()}: Failed to fix JSON string: {llm_output}")
+        return None
 
-    # Log the original output for debugging - this ensures we have the full context
-    # even if processing fails later
-    logging.info(f"Original LLM output: {llm_output}")
-
-    # If we have a Pydantic model to aim for
-    if Pydantic_format is not None:
-
-        # Step 0: Ugly hack :) - Locate the start of a potential JSON object
-        json_start_index = llm_output.find('{')
-        if extracted_json = cleanup_json(llm_output):
-            try:
-                # Step 1: Validate the extracted string as proper JSON
-                json.loads(extracted_json)
-                logging.info(f"Extracted and validated JSON: {extracted_json}")
-
-            except json.JSONDecodeError:
-                # If the extracted JSON is invalid, log and try to repair it; 
-                logging.error(f"Extracted JSON is invalid: {extracted_json}")
-                extracted_json = fix_json(extracted_json)
-                if extracted_json is None: 
-                    # give up and log
-                    return None
-                else:
-                    try:
-                        # Try parsing the repaired JSON into the Pydantic model
-                        return Pydantic_format.parse_raw(extracted_json)
-                    except ValidationError as e:
-                        
-        else:
-                # If no valid JSON structure is found after the '{', log and exit
-                logging.error(f"No valid JSON structure found after '{{': {llm_output[json_start_index:]}")
-                return None
-    else:
-        # If no '{' is found at all, log and exit
-            logging.error(f"No '{{' found in LLM output: {llm_output}")
-            return None
-
-        # Step 2: Try the simplest approach—parse the string directly into the Pydantic model
+    if Pydantic_format:
         try:
-            parser = PydanticOutputParser(pydantic_object=Pydantic_format)
-            return parser.parse(llm_output)  # If this works, we’re done — return the Pydantic object
+            pydantic_obj = Pydantic_format.parse_obj(json_obj)  # Validate the JSON object with Pydantic 
+            return json_obj
         except ValidationError as e:
-            # If Step 2 fails (e.g., JSON is malformed or doesn’t match the model), log it
-            logging.warning(f"Pydantic parsing failed for '{llm_output}': {e}")
-            
-            # Step 3: If we have an LLM, use it to fix the output
-            if llm:
-                try:
-                    # Create a fixer that uses the LLM to repair the bad output
-                    fixing_parser = OutputFixingParser.from_llm(
-                        parser=PydanticOutputParser(pydantic_object=Pydantic_format), 
-                        llm=llm
-                    )
-                    return fixing_parser.parse(llm_output)  # Return the fixed Pydantic object if it works
-                except Exception as e:
-                    # If the LLM fix fails (e.g., network issue or LLM can’t fix it), log it
-                    logging.warning(f"OutputFixingParser failed: {e}")
-            
-            # Step 4: Brute force—try to repair the JSON without an LLM
-            fixed_string = fix_json(llm_output)  # Get a hopefully valid JSON string
-            if not fixed_string.startswith(INVALID_JSON_STR):  # Check if repair worked
-                try:
-                    # Try parsing the repaired JSON into the Pydantic model
-                    return Pydantic_format.parse_raw(fixed_string)
-                except ValidationError as e:
-                    # If it still doesn’t fit the model, log and give up
-                    logging.warning(f"Brute force recovery failed: {e}")
-            else:
-                # If JSON repair failed, log and skip further Pydantic parsing
-                logging.warning(f"JSON repair failed, skipping Pydantic parsing")
-            return None  # All attempts failed, so return None to signal defeat
-    
-    # If no Pydantic model is provided, just clean up the JSON and return it as a string
+            logging.error(f"{my_name()}: Pydantic validation failed: {e}")
+            return None
     else:
-        try:
-            # Try to parse and re-dump the string as valid JSON
-            return json.dumps(json.loads(llm_output), ensure_ascii=False)
-        except json.JSONDecodeError:
-            # If it’s not valid JSON, fall back to repairing it
-            return fix_json(llm_output)
+        return json_obj  # without validation 
+    
          
-
+# simplest cleanup - locating outward '{' '}'
 def cleanup_json(text: str) -> str:
     start = text.find('{')
     end = text.rfind('}') + 1
     if start == -1 or end == -1:
-        logging.warning(f"No valid JSON found }")
+        logging.warning(f"{my_name()}: No valid JSON found for {text}")
         return None
     return text[start:end]
 
-def cleanup_json1(text: str) -> str:
-    json_start_index = text.find('{')
-    if json_start_index != -1:
-        # Attempt to extract the first valid JSON object using regex
-        # The regex handles nested structures to avoid cutting off mid-object
-        json_match = re.search(r'\{(?:[^{}]|(?:\{[^{}]*\}))*\}', text[json_start_index:], re.DOTALL)
-        if json_match:
-            extracted_json = json_match.group(0)  # Capture the matched JSON string
+# deeper cleenup with recurrance 
+def cleanup_json_re(text: str) -> str:
+    json_match = re.search(r'\{(?:[^{}]|(?:\{[^{}]*\}))*\}', text, re.DOTALL)
+    if json_match:
+        return json_match.group(0)  # Capture the matched JSON string
+    else: 
+        logging.warning(f"{my_name()}: No valid JSON found for {text}")
+        return None
+
+# accepts a malformed JSON string from LLM output; returns a parsed dictionary or None
+# accepts a malformed JSON string from LLM output; returns a parsed dictionary or None
+def json_to_dict(text: str) -> Optional[dict]:
+    """Converts a potentially malformed JSON string from LLM output into a dictionary."""
+    json_str = cleanup_json(text)
+    if json_str is None:
+        json_str = cleanup_json_re(text)
+        if json_str is None:
+            logging.warning(f"{my_name()}: cleanup_json_re() failed to produce valid JSON for {text}")
             try:
-                # Step 1: Validate the extracted string as proper JSON
-                json.loads(extracted_json)
-                logging.warning(f"Extracted and validated JSON: {extracted_json}")
-                text = extracted_json  # Update llm_output to the validated JSON
-            except json.JSONDecodeError:
-                # If the extracted JSON is invalid, log and exit early
-                logging.error(f"Extracted JSON is invalid: {extracted_json}")
-                return None
-        else:
-            # If no valid JSON structure is found after the '{', log and exit
-            logging.error(f"No valid JSON structure found after '{{': {text[json_start_index:]}")
-            return None
-
-# accepts a broken JSON str; returns a valid json string OR "invalid JSON: {llm_output}"
-def fix_json(llm_output: str) -> str:
-   
+                json_obj = json5.loads(text)
+                json_str = json.dumps(json_obj)
+            except ValueError as e:
+                logging.warning(f"{my_name()}: json5 failed to produce valid json: {e} for {text}. Attempting repair_json()")
+                try:
+                    json_str = repair_json(text)
+                except json.JSONDecodeError as e:
+                    logging.warning(f"{my_name()}: repair_json failed to produce valid JSON: {e} for {text}")
+                    return None
+    
+    if json_str is None:  # Redundant but explicit
+        return None
+    
     try:
-        parsed = json5.loads(llm_output)
-        return json.dumps(parsed, ensure_ascii=False)
-    except json5.JSON5DecodeError:
-        logging.warning(f"json5 failed to produce valid json. Attempting repair_json()")
-        repaired = repair_json(llm_output)
-        try:
-            json.loads(repaired)  # Validate the repair
-            return repaired
-        except json.JSONDecodeError:
-            logging.warning(f"repair_json failed to produce valid JSON: {repaired}")
-            return f"{INVALID_JSON_STR}{llm_output}"
+        return json.loads(json_str)
+    except json.JSONDecodeError as e:
+        logging.error(f"{my_name()}: JSON final parsing failed for {text}. Error: {str(e)}")
+        return None
 
+
+#-------------------------------------- REMOVE_SELF_REVIEWS() --------------------------------------------------------------
+
+# accepts  "validated_dict" in PeerReviewFormat, validates it, removes self-reviews, and returns a cleaned-up version. 
+def remove_self_reviews(validated_dict, pydantic_format: Optional[Type[BaseModel]] = None):
+    """Remove self-reviews from validated_dict, ensuring Pydantic compliance."""
+    cleaned_up_dict = validated_dict.copy()
+    if not SELF_REVIEW:
+        for agent_name in list(cleaned_up_dict.keys()): # these are names of the agents that have done peer reviews 
+            reviews = cleaned_up_dict[agent_name]["reviews"]
+            if agent_name in reviews:
+                logging.info(f"{my_name()}: Removing self-review for {agent_name}")
+                del reviews[agent_name]
+            if not reviews:
+                logging.info(f"{my_name()}: No valid peer reviews left for {agent_name} after self-review removal")
+                del cleaned_up_dict[agent_name]
+
+    # Validate the entire cleaned-up dict after filtering, outside the loop
+    if pydantic_format and cleaned_up_dict:  # Only validate if there’s data
+        temp_dict = cleaned_up_dict.copy()  # Work on a temp copy to preserve original if needed
+        for agent_name in list(temp_dict.keys()):
+            try:
+                pydantic_format.parse_obj(temp_dict[agent_name])
+            except ValidationError as e:
+                logging.error(f"{my_name()}: Post-filter validation failed for {agent_name}. Error: {e}")
+                del temp_dict[agent_name]
+        cleaned_up_dict = temp_dict  # Update only if all validations pass
+        if not cleaned_up_dict:
+            logging.error(f"{my_name()}: No entries remain after Pydantic validation")
+    else:
+        logging.info(f"{my_name()}: No reviews to validate after self-review filtering")
+
+    return cleaned_up_dict
 
 #**********************************************************************************************************************
 #****************************************** WORKFLOW CLASS DEFINITION  ************************************************
@@ -457,22 +447,22 @@ class TeamworkFlow(Flow):
 
         # create a leader: 
         leader_name = LEADER_MODEL
-        self.leader_agent, self.leader_agent_name = create_agent_from_name(leader_name, "Leader")
+        self.leader_agent, self.leader_agent_name = create_agent_from_name(leader_name, LEADER_BASE_NAME)
         if self.leader_agent == None:
-            logging.error(f"Can't create Leader for leader_name: {leader_name}")
-            raise RuntimeError(f"Can't create Leader for leader_name: {leader_name}. Execution will be stopped")
+            logging.error(f"{my_name()}: Can't create Leader for leader_name: {leader_name}")
+            raise RuntimeError(f"{my_name()}: Can't create Leader for leader_name: {leader_name}. Execution will be stopped")
 
         # create agents:  
         agent_models = AGENT_MODELS
         for model_name in agent_models:
-            agent, agent_name = create_agent_from_name(model_name, "Agent")
+            agent, agent_name = create_agent_from_name(model_name, AGENT_BASE_NAME)
             if agent is None:  
                 logging.warning(f"Skipping {model_name} because the agent could not be created.")
                 continue  # Skip to the next model, so that all agents are valid. If not, CrewAI fails if agent is None
 
             self.agents.append(agent)
             self.agent_names.append(agent_name)
-            logging.info(f"Created agent: {agent_name}")    
+            logging.info(f"{my_name()}: Created agent: {agent_name}")    
 
 
     def kickoff(self):
@@ -485,7 +475,7 @@ class TeamworkFlow(Flow):
     @start()
     def analyze_query(self):
         
-        logging.info("Starting analyze_query")
+        logging.info(f"{my_name()}: Starting analyze_query")
         self.state["analysis_state"] = {}
         
         query = self.state["query"]
@@ -494,32 +484,33 @@ class TeamworkFlow(Flow):
                     prompt=get_analysis_prompt(query), 
                     expected_output="one single QUERY_TYPE"
                     ) 
-        # later, parse the output. Returns a valid Pydantic QueryAnalysisResponseClass or None if JSON can't be recovered 
-        result = pydantic_from_str(response, Pydantic_format=QueryAnalysisFormat, llm=self.leader_agent.llm)
+        # later, parse the output. Returns a valid dict matching Pydantic QueryAnalysisFormat - or None if JSON can't be recovered 
+        result = dict_from_str(response, Pydantic_format=QueryAnalysisFormat)
         
         if result is None:
-            logging.error(f"\n Leader LLM failed to analyze the query")
-            raise RuntimeError(f"\nLeader LLM failed to analyze the query. Execution will be stopped")      
+            logging.error(f"\n{my_name()}: Leader LLM failed to analyze the query")
+            raise RuntimeError(f"\n{my_name()}: Leader LLM failed to analyze the query. Execution will be stopped")      
         
-        query_type = result.query_type.upper()
+        query_type = result["query_type"].upper()
         if query_type not in QUERY_TYPES:
-            logging.warning(f"Invalid query_type '{query_type}', defaulting to 'OTHER'")
+            logging.warning(f"{my_name()}: Invalid query_type '{query_type}', defaulting to 'OTHER'")
             query_type = "OTHER"
         self.state["analysis_state"]["query_type"] = query_type
         self.state["analysis_state"]["criteria"] = QUERY_TYPES[query_type]
         # self.state["analysis_state"]["criteria"] = result.criteria           # let the LLM override criteria in future 
         
         # Recommending TOOLS:
-        self.state["analysis_state"]["recommended_tools"] = result.recommended_tools             
+        self.state["analysis_state"]["recommended_tools"] = result["recommended_tools"]             
 
         return self.state  # Return state to ensure flow continuation
 
+   
     #--------------------------------------------------- GENERATE_RESPONSES() -----------------------------------------------------
     @listen("analyze_query")
     async def generate_responses(self):
         """ Instantiates agents using globabl list, runs them, and adds their responses to state['responses'] """
         
-        logging.info(f"Starting generate_responses - Agents available: {len(self.agents)}")
+        logging.info(f"{my_name()}: Starting generate_responses - Agents available: {len(self.agents)}")
 
         # initializing variables
         tasks = [] # will store async tasks 
@@ -536,17 +527,25 @@ class TeamworkFlow(Flow):
         # analyze the response and fill in the state object. Since "results" are just agent responses, no JSON checkup required
         # potential issues: "result" could be None or empty 
         self.state["generate_responses_state"] = {
-            agent_name: result.tasks_output[0].raw # if not isinstance(result, str) else f"Invalid JSON: {result}"
-                for agent_name, result in zip(self.agent_names, results)
+            agent_name: result.tasks_output[0].raw 
+                for agent_name, result in zip(self.agent_names, results) if result.tasks_output is not None
         }
 
-        logging.info(f"State after generate_responses: {self.state["generate_responses_state"]}")
+        logging.info(f"{my_name()}: state after generate_responses: {self.state["generate_responses_state"]}")
 
         return self.state  # Return state to ensure flow continuation"
+
 
 #--------------------------------------------------- PEER_REVIEW() -----------------------------------------------------
     @listen("generate_responses")
     async def peer_review(self):
+        
+        logging.info(f"{my_name()}: Starting peer review")
+        self.state["peer_review_state"] = {}
+        if not self.state.get("generate_responses_state"):
+            logging.error(f"{my_name()}: No generated responses available")
+            return self.state
+
         self.state["peer_review_state"] = {}
         criteria = self.state["analysis_state"]["criteria"]
         responses = self.state["generate_responses_state"]
@@ -557,7 +556,7 @@ class TeamworkFlow(Flow):
             responses=responses,
             criteria=criteria
         )
-        logging.info(f"Starting peer review. Prompt: {peer_review_prompt}")
+        logging.info(f"{my_name()}: starting peer review. Prompt: {peer_review_prompt}")
 
         try:
             results = await exec_async(
@@ -566,166 +565,169 @@ class TeamworkFlow(Flow):
                 prompt=peer_review_prompt,
                 expected_output="a single JSON object with improvement points and scores"
             )
-            logging.info(f"Async peer review generated results: {len(results)} items")
+            logging.info(f"{my_name()}: Async peer review generated results: {len(results)} items")
         except Exception as e:
-            logging.error(f"Error in exec_async: {e}")
+            logging.error(f"{my_name()}: Error in exec_async: {e}")
             return self.state
+
+        validated_dict = {}   # will store validated dictionaries
 
         for agent_name, result in zip(self.agent_names, results):
+            
+            if isinstance(result, Exception):
+                logging.error(f"{my_name()}: Failed to get review from {agent_name}: {str(result)}")
+                continue
+            
             raw_output = result.tasks_output[0].raw if result.tasks_output else "No output"
-            logging.info(f"Processing review for {agent_name}. Raw output: {raw_output}")
+            
+            logging.info(f"{my_name()}: Processing review for {agent_name}. Raw output: {raw_output}")
 
-            try:
-                # Step 1: Wrap the raw output string with "reviews"
-                # Assume raw_output is a JSON string like '{"Agent-OPENAI-...": {"improvement_points": [...], "score": 6}}'
-                wrapped_output = {"reviews": json.loads(raw_output)}  # Parse here to embed in dict
-                wrapped_output_str = json.dumps(wrapped_output)  # Convert back to string for pydantic_from_str
+            json_dict = dict_from_str(raw_output)
+            if json_dict is None:
+                logging.error(f"{my_name()}: failed to parse JSON for {agent_name}. Raw output: {raw_output}")
+                continue # Skip to the next agent
 
-                # Step 2: Validate with pydantic_from_str
-                validated_review = pydantic_from_str(
-                    wrapped_output_str,
-                    Pydantic_format=RawPeerReviewOutput,
-                    llm=self.leader_agent.llm
-                )
-
-                if validated_review is None:
-                    logging.warning(f"Validation failed for {agent_name}. Raw output: {raw_output}")
-                    continue
-
-                # Step 3: Filter reviews (exclude self-reviews unless SELF_REVIEW is True)
-                reviews = {
-                    peer_name: review.dict()  # Convert to plain dict
-                    for peer_name, review in validated_review.reviews.items()
-                    if peer_name in responses and (peer_name != agent_name or SELF_REVIEW)
-                }
-                logging.info(f"Filtered reviews for {agent_name}: {reviews}")
-
-                if reviews:
-                    # Step 4: Create PeerReviewFormat and store it
-                    peer_review = PeerReviewFormat(
-                        agent_name=agent_name,
-                        reviews=reviews
-                    )
-                    self.state["peer_review_state"][agent_name] = peer_review.dict()
-                    logging.info(f"Stored review for {agent_name}: {self.state['peer_review_state'][agent_name]}")
-                else:
-                    logging.warning(f"No valid reviews after filtering for {agent_name}")
-
-            except json.JSONDecodeError as e:
-                logging.warning(f"JSON parsing failed for {agent_name}: {e}. Raw output: {raw_output}")
-            except Exception as e:
-                logging.warning(f"Error processing review for {agent_name}: {e}. Raw output: {raw_output}")
-
-        logging.info(f"State after peer_review: {self.state['peer_review_state']}")
-        return self.state
+            # wrap it up properly with the "agent_name" and "reviews" keys
+            validated_dict[agent_name] = {"agent_name": agent_name, "reviews": json_dict}   
+        
+        # FOR loop ends. Remove self-reviews if needed - and  check Pydantic compliance: 
+        logging.info(f"{my_name()}: Validated peer reviews : validated_dict")
+        
+        validated_dict = remove_self_reviews(validated_dict, pydantic_format=PeerReviewFormat)
+        if not validated_dict:
+            logging.error(f"{my_name()}: No valid peer reviews found")
+           
+        else: 
+            self.state["peer_review_state"] = validated_dict
+        
+        logging.info(f"\n{my_name()}: final peer review state: {self.state["peer_review_state"]}")
+        # start("final_response")
+        # await self._execute_listeners("final_response")
+        await final_response(self)
+        return self.state               # Return state to ensure flow continuation"
 
 #--------------------------------------------------- FINAL_RESPONSE() -----------------------------------------------------
-    @listen("peer_review")
-    def final_response(self):
-        # the Leader goes over the peer reviews, collects the stats and picks up the winner 
-        self.state["final_response_state"] = {} 
+@listen("peer_review")
+async def final_response(self):
+    
+    logging.info(f"{my_name()}: Starting final response calculation.")
 
-        prompt = get_final_response_prompt(
-            agent_names=self.agent_names,
-            query=self.state["query"],
-            peer_reviews=self.state["peer_review_state"],
-            criteria=self.state["analysis_state"]["criteria"]
-        )
+    self.state["final_response_state"] = {} 
+    peer_reviews_dict = self.state["peer_review_state"]
 
-        logging.info(f"Starting final analysis. Prompt: {prompt}")
-     
-        result = exec_sync(self.leader_agent, self.leader_agent_name, 
-                prompt=prompt, 
-                expected_output="a single JSON object with a winner and its average score"
-                ) 
-  
-        obj = pydantic_from_str(result, Pydantic_format=FinalResponseFormat, llm=self.leader_agent.llm )
-        
-        if obj is None:
-            logging.error(f'Final response failed: {result.tasks_output[0].raw}') 
-            return self.state
-        
-        self.state["final_response_state"] = {
-                "winner": obj.winner_name, 
-                "winner_avg_score": obj.winner_avg_score,
-                "winner_response": obj.winner_response,    
-                "winner_improvement_points": obj.winner_improvement_points, # now they come without a reference to the agent who wrote them? 
-                "peer_review_scores": obj.peer_review_scores
+    if not peer_reviews_dict:
+        logging.error(f"{my_name()}: No peer reviews available; cannot determine winner")
+        self.state["final_response_state"] = {"winner": {}, "peer_review_scores": {}}
+        return self.state
+
+    scores_table = {}
+    # Gather all unique agents (reviewers and reviewed)
+    all_agents = set(peer_reviews_dict.keys())
+    for review in peer_reviews_dict.values():
+        all_agents.update(review["reviews"].keys())
+
+    # Initialize scores_table
+    for agent_name in all_agents:
+        scores_table[agent_name] = {
+            "scores_from_peers": {},
+            "avg_score_from_peers": 0,
+            "improvements_from_peers": [],
+            "scores_given": {},
+            "avg_score_given": 0
         }
 
-        return self.state  # Return state to ensure flow continuation"
-    
+    # Populate scores_table
+    for agent_name, review in peer_reviews_dict.items():
+        reviews = review["reviews"]
+        for peer_name, review_data in reviews.items():
+            scores_table[agent_name]["scores_given"][peer_name] = review_data["score"]
+            scores_table[peer_name]["scores_from_peers"][agent_name] = review_data["score"]
+            scores_table[peer_name]["improvements_from_peers"].extend(review_data["improvement_points"])
+
+    # Calculate averages
+    for agent_name in scores_table:
+        scores_from = scores_table[agent_name]["scores_from_peers"]
+        scores_given = scores_table[agent_name]["scores_given"]
+        scores_table[agent_name]["avg_score_from_peers"] = (
+            sum(scores_from.values()) / len(scores_from) if scores_from else 0
+        )
+        scores_table[agent_name]["avg_score_given"] = (
+            sum(scores_given.values()) / len(scores_given) if scores_given else 0
+        )
+
+    # Pick the winner
+    winner_name = max(scores_table, key=lambda x: scores_table[x]["avg_score_from_peers"]) if any(scores_table[a]["scores_from_peers"] for a in scores_table) else next(iter(all_agents))
+    winner_avg_score = scores_table[winner_name]["avg_score_from_peers"]
+    winner_response = self.state["generate_responses_state"].get(winner_name, "Response not found")
+    winner_improvement_points = scores_table[winner_name]["improvements_from_peers"]
+
+    peer_review_winner = {
+        "winner": winner_name,
+        "winner_score": winner_avg_score,
+        "winner_response": winner_response,
+        "winner_improvement_points": winner_improvement_points
+    }
+
+    self.state["final_response_state"]["winner"] = peer_review_winner
+    self.state["final_response_state"]["peer_review_scores"] = scores_table
+    return self.state
 
 #**********************************************************************************************************************
 #*********************************************** MAIN FUNCTION ********************************************************
 #**********************************************************************************************************************
 
+# Helper
+def print_peer_review_table(peer_scores, full_agent_names, model_names):
+    """Prints a formatted table of peer review scores."""
+    print("\nCross-Review Table (Scores Given by Row Agent to Column Agent):")
+    header = "Model Name".ljust(20) + " | " + " | ".join(name.center(12) for name in model_names)
+    print(header)
+    print("-" * len(header))
+
+    for row_idx, row_agent in enumerate(model_names):
+        full_row_name = full_agent_names[row_idx]
+        scores = peer_scores.get(full_row_name, {}).get("scores_given", {})
+        row = [row_agent.ljust(20)]
+        for col_idx, col_agent in enumerate(model_names):
+            full_col_name = full_agent_names[col_idx]
+            if full_row_name == full_col_name and not SELF_REVIEW:
+                score = "x".center(12)
+            else:
+                score = str(scores.get(full_col_name, "-")).center(12)
+            row.append(score)
+        print(" | ".join(row))
+
 if __name__ == "__main__":
-
-    # set logging level globally:
     logging.getLogger().setLevel(LOG_LEVEL)
-
-    # flow = TeamworkFlow("Write a Python function to find the longest palindromic substring...")
-    flow = TeamworkFlow("Напишите короткое хайку о сложности программирования агентов с ИИ")
-    # flow = TeamworkFlow("Please give me a few practical use cases for using CrewAI and LangChain 'tools'") 
+    flow = TeamworkFlow(
+        # "Напишите короткое хайку о сложности программирования агентов с ИИ"
+        "Напишите историю о роботе, который спасает принцессу из замка (не более 300 слов)"
+        )
     flow.kickoff()
-   
-    json_str = json.dumps(flow.state, indent=2, ensure_ascii=False)
-    formatted_output = json_str.replace("\\n", "\n").replace('\\"', '"')  # Replace escaped newlines with real ones and remove backslashes
-    print(f"\nFinal state: {formatted_output}")
-    # pprint(formatted_output, indent=2, width=80)
-"""
-    # Get the relevant objects from json:
+    logging.info(f"Events dispatched: {flow.listeners.keys()}")
     
-    json_str = flow.state["peer_review_state"]  
+    final_state = flow.state.get("final_response_state", {})
+    if not final_state:
+        logging.error(f"{my_name()}: No final response state available")
+        print("No final response state available.")
+    else:
+        json_str = json.dumps(final_state, indent=2, ensure_ascii=False)
+        formatted_output = json_str.replace("\\n", "\n").replace('\\"', '"')
+        print(f"\nFinal state: {formatted_output}")
 
-    # re-create the PeerReviewFormat 
-    peer_review_obj = PeerReviewFormat.parse_raw(json_str)
-    peer_reviews = peer_review_obj.reviews
-     
-    scores_dict = {}  # agent_name -> list of (peer_name, score)
-    improvement_points_dict = {}  # agent_name -> list of improvement points
+        peer_scores = final_state.get("peer_review_scores", {})
+        if not peer_scores:
+            print("No peer review scores available.")
+        else:
+            # create a mapping from full agent names to short names
+            full_agent_names = list(peer_scores.keys())     # these are present in the peer_scores
+            logging.info(f"Full agent names: {full_agent_names}")
 
-    for review in peer_reviews:
-        reviewed_agent = review.agent_name
-        if reviewed_agent not in scores_dict:
-            scores_dict[reviewed_agent] = []
-            improvement_points_dict[reviewed_agent] = []
-        
-        for peer_name, review_data in review.reviews.items():
-            scores_dict[reviewed_agent].append((peer_name, review_data.score))
-            improvement_points_dict[reviewed_agent].extend(review_data.improvement_points)
+            agent_to_model = {}
+            model_names = [short_name(full_name) for full_name in full_agent_names]
+            logging.info(f"Model names: {model_names}")
 
-    # Calculate average scores
-    avg_scores = {}
-    for agent_name, scores in scores_dict.items():
-        total_score = sum(score for _, score in scores)
-        avg_scores[agent_name] = total_score / len(scores)
+            print("\nCross-Review Table (Scores Given by Row Agent to Column Agent):")
+            print_peer_review_table(peer_scores, full_agent_names, model_names)
 
-    # Pick the winner
-    winner_name = max(avg_scores, key=avg_scores.get)
-    winner_avg_score = avg_scores[winner_name]
 
-    # Get winner's response from agent_responses
-    winner_response = next(agent.response for agent in agent_responses if agent.agent_name == winner_name)
-
-    # Build peer_review_scores in the required format
-    peer_review_scores = {
-        agent_name: [
-            InnerPeerReviewScoresFormat(peer_name=peer, score=score) for peer, score in scores
-        ]
-        for agent_name, scores in scores_dict.items()
-    }
-
-    # Construct the FinalResponseFormat
-    final_output = FinalResponseFormat(
-        winner_name=winner_name,
-        winner_response=winner_response,
-        winner_avg_score=winner_avg_score,
-        winner_improvement_points=improvement_points_dict[winner_name],
-        peer_review_scores=peer_review_scores
-    )
-
-    # Print the result
-    print(json.dumps(final_output.dict(), indent=2, ensure_ascii=False))
-"""
