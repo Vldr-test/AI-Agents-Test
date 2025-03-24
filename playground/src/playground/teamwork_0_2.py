@@ -3,8 +3,8 @@ import os
 import json
 import json5
 import demjson3
-
-from json_repair import repair_json
+# from json_repair import repair_json
+import time
 import re
 import inspect
 from pprint import pprint, pformat
@@ -70,6 +70,76 @@ AGENT_MODELS = [
     "xai/grok"
 ]
 
+JSON_ENFORCEMENT_MAP = {
+    "gpt-4": {
+        "generic_json": {
+            "parameter": "response_format",
+            "value": {"type": "json_object"}
+        },
+        "specific_schema": {
+            "parameter": "response_format",
+            "value": {"type": "json_schema", "json_schema": "{schema}", "strict": True}
+        }
+    },
+    "gpt-3.5-turbo": {
+        "generic_json": {
+            "parameter": "response_format",
+            "value": {"type": "json_object"}
+        },
+        "specific_schema": {
+            "parameter": "response_format",
+            "value": {"type": "json_schema", "json_schema": "{schema}", "strict": True}
+        }
+    },
+    "anthropic/claude-3": None,
+    "anthropic/claude-2": None,
+    "gemini/gemini-1.5": {
+        "generic_json": {
+            "parameter": "generation_config",
+            "value": {"response_mime_type": "application/json"}
+        },
+        "specific_schema": {
+            "parameter": "generation_config",
+            "value": {"response_mime_type": "application/json", "response_schema": "{schema}"}
+        }
+    },
+    "gemini/gemini-2.0-flash": {
+        "generic_json": {
+            "parameter": "generation_config",
+            "value": {"response_mime_type": "application/json"}
+        },
+        "specific_schema": {
+            "parameter": "generation_config",
+            "value": {"response_mime_type": "application/json", "response_schema": "{schema}"}
+        }
+    },
+    "xai/grok": {
+        "generic_json": {
+            "parameter": "response_format",
+            "value": {"type": "json_object"}
+        },
+        "specific_schema": {
+            "parameter": "response_format",
+            "value": {"type": "json_schema", "json_schema": "{schema}", "strict": True}
+        }
+    },
+    "llama-3": None,
+    "deepseek-chat": {
+        "generic_json": {
+            "parameter": "response_format",
+            "value": {"type": "json_object"}
+        },
+        "specific_schema": None
+    },
+    "deepseek-coder": {
+        "generic_json": {
+            "parameter": "response_format",
+            "value": {"type": "json_object"}
+        },
+        "specific_schema": None
+    }
+}
+
 
 MODEL_PROVIDER_MAP = {
     "gpt-": "openai",
@@ -106,50 +176,28 @@ SELF_REVIEW = False    # if set to True, agents will review their own work :)
 import crewai_tools
 from crewai_tools import YoutubeVideoSearchTool, SerperDevTool, WebsiteSearchTool, CodeInterpreterTool  # need to check they match the AVAILABLE_TOOLS table
 
-class ToolWrapper:
-    def __init__(self, tool):
-        self.tool = tool
-        self.logger = logging.getLogger(f"ToolWrapper.{tool.__class__.__name__}")
-        self.logger.setLevel(logging.INFO)
-        handler = logging.StreamHandler()
-        # handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-        self.logger.addHandler(handler)
-
-    def __call__(self, *args, **kwargs):
-        self.logger.info(f"Calling tool with args: {args}, kwargs: {kwargs}")
-        print(f"Calling tool with args: {args}, kwargs: {kwargs}")
-        result = self.tool(*args, **kwargs)
-        self.logger.info(f"Tool returned: {result}")
-        print(f"Tool returned: {result}")
-        return result
 
 
 AVAILABLE_TOOLS = {
         "YoutubeVideoSearchTool": 
             { 
             "tool_description": YoutubeVideoSearchTool().description, # "A RAG tool aimed at searching within YouTube videos, ideal for video data extraction.",
-            "tool_factory": ToolWrapper(YoutubeVideoSearchTool)
+            "tool_factory": YoutubeVideoSearchTool
             }, 
         "SerperDevTool" :{ 
             "tool_description":SerperDevTool().description, # "Designed to search the internet and return the most relevant results.",
-            "tool_factory": ToolWrapper(SerperDevTool)
+           "tool_factory": SerperDevTool
             },
 #        "WebsiteSearchTool" : { 
 #            "tool_description": WebsiteSearchTool().description, # "Performs a RAG (Retrieval-Augmented Generation) search within the content of a website.",
-#           "tool_factory": ToolWrapper(WebsiteSearchTool)
+#           "tool_factory": WebsiteSearchTool
 #            },
         "CodeInterpreterTool" : {
             "tool_description": CodeInterpreterTool().description,
-            "tool_factory": ToolWrapper(CodeInterpreterTool)
+            "tool_factory": CodeInterpreterTool
         }
     }
 
-tool_logger = logging.getLogger("crewai.tools")
-tool_logger.setLevel(logging.DEBUG)
-logging.getLogger("crewai.tools.CodeInterpreterTool").setLevel(logging.DEBUG)
-logging.getLogger("crewai.tools.YoutubeVideoSearchTool").setLevel(logging.DEBUG)
-logging.getLogger("crewai.tools.SerperDevTool").setLevel(logging.DEBUG)
-logging.getLogger("crewai.tools.WebsiteSearchTool").setLevel(logging.DEBUG)
 
 
 
@@ -210,7 +258,7 @@ class WinnerFormat(BaseModel):
 def get_analysis_prompt(query, available_tools, format=QueryAnalysisFormat):
     tool_list = [tool_name for tool_name in AVAILABLE_TOOLS.keys()]
     prompt = (
-        f"Classify the query '{query}' into one of these types: [{', '.join(QUERY_TYPES.keys())}]. "
+        f"Classify the query '{query}' into ONE and ONLY ONE of these types: [{', '.join(QUERY_TYPES.keys())}]. "
         f"Return a simple JSON object with two fields: "
         f"- 'query_type': a string from the list above "
         f"- 'recommended_tools': a list of tool names from [{', '.join(tool_list)}], or [] if none apply. "
@@ -244,23 +292,13 @@ def get_peer_review_prompt(query, responses, criteria):
     )
 
 
-def get_final_response_prompt(agent_names, query, peer_reviews, criteria):
-    agent1 = agent_names[0] if agent_names else "Agent1"
-    return (
-        f"Return ONLY a single JSON dictionary — NO prose, NO extra text, NO newlines, NO markers. "
-        f"From peer reviews by {agent_names} for '{query}': {json.dumps(peer_reviews)}. "
-        f"For each agent, calculate the average score from all reviews. "
-        f"Average means summing all scores for an agent and dividing by the total number of reviews. "
-        f"Include a 'scores_table' with each agent's scores from every reviewer. "
-        f"Pick the winner with the highest average score, and set 'final_score' to that average. "
-        f"Format as: {{'winner': '{agent1}', 'final_score': 7.8, 'scores_table': {{'Agent1': {{'Agent1': 8, 'Agent2': 7}}, ...}}}}"
-    )
-
 def get_second_pass_prompt(query, criteria, winner_response, improvement_points):
     return ( 
         f"Based on the query '{query}' and the criteria {', '.join(criteria)}, improve the following response:\n"
             f"{winner_response}\n"
             f", taking the following improvement points into account: {', '.join(improvement_points)}\n"
+            f"Compare your new response to the original and make sure that your new response is better than the original.\n"
+            f"Rework your new response if required, until it is better than the original.\n"
             f"Return the response as a plain string — no Unicode escape characters like '\\u0412': you should use 'В' instead of '\\u0412'. "
             f"**No prose, no explanations, no extra text outside the response.** "
         )   
@@ -378,7 +416,33 @@ def create_agent_from_name(model_name, base_name="", tools=None):
         logging.error(f"Missing API key ({config['env_var']}) in .env for {provider}")
         return None, None
     try:
-        llm = config["llm_class"](model=model_name, api_key=config["api_key"], temperature=config["temperature"])
+        
+        # trying to enforce generic JSON output wherever possible:  
+
+        # Set up LLM parameters
+        llm_params = {
+            "model": model_name,
+            "api_key": config["api_key"],
+            "temperature": config["temperature"],
+            "model_kwargs": {}  # Explicitly initialize model_kwargs
+        }
+
+         
+        # Check if the model supports JSON output
+        json_config = JSON_ENFORCEMENT_MAP.get(model_name, {}).get("generic_json", {})
+
+        if json_config:
+            # Example: For OpenAI, this might set {"response_format": {"type": "json_object"}}
+            
+            parameter = json_config["parameter"]
+            value = json_config["value"]
+            llm_params["model_kwargs"][parameter] = value
+            logging.error(f"JSON enforcement enabled for {model_name}. llm_params: {llm_params}")
+        else: 
+            del llm_params["model_kwargs"]
+
+        
+        llm = config["llm_class"](**llm_params)
 
         agent = Agent(
             role="agent",
@@ -387,7 +451,7 @@ def create_agent_from_name(model_name, base_name="", tools=None):
             verbose=VERBOSE,
             llm=llm,
             allow_delegation=False,
-            tools=tools
+            tools=tools 
         )
 
         # Crew expects one more attribure, apparently:
@@ -428,11 +492,15 @@ def exec_sync(agent, agent_name, prompt, expected_output):
         raise RuntimeError(f"Can't create Pseudo Crew for {agent_name}. Execution will be stopped")
         
     logging.info(f"Crew created for {agent_name}")
-    try:
-        results = pseudo_crew.kickoff()  # Synchronous
-    except Exception as e:
-        logging.error(f"{my_name()} - pseudo_crew for {agent_name} failed: {e}")
-        inform_user(f"Couldn't launch crew for {agent_name}", severity="ERROR" )
+    for attempt in range(3):
+        try:
+            results = pseudo_crew.kickoff()  # Synchronous
+            break
+        except Exception as e:
+            logging.error(f"{my_name()} - pseudo_crew for {agent_name} failed: {e}. Attempt {attempt + 1}")
+            time.sleep(2)   # wait before retrying 
+            if attempt == 2: # last attempt 
+                inform_user(f"Couldn't launch crew for {agent_name}", severity="ERROR" )
         
     return results.tasks_output[0].raw 
 
@@ -532,22 +600,29 @@ def cleanup_json_re(text: str) -> str:
 def json_to_dict(text: str) -> Optional[dict]:
     """Converts a potentially malformed JSON string from LLM output into a dictionary or None."""
     
-    text = text.replace("```json", "").replace("```", "").strip()
+    # text = text.replace("```json", "").replace("```", "").strip()
+    
+    # Simple repair: if it starts with '{' but doesn't end with '}', append '}'. This is an ugly manual hack :( 
+    # if text.startswith('{') and not text.endswith('}'): text += '}'
+    
     # first try it simple: 
     try:
         return json.loads(text)
     except json.JSONDecodeError as e:
         logging.error(f"{my_name()}: JSON simple parsing failed for: {text}. Error: {str(e)}")
-        try:
-            return json5.loads(text)
-        except ValueError as e:
-            logging.error(f"{my_name()}: json5 parsing failed for: {text}. Error: {str(e)}")
-            try:
-                # demjson3 can attempt to repair and parse malformed JSON
-                return demjson3.decode(text)
-            except demjson3.JSONDecodeError as e:
-                logging.error(f"{my_name()}: demjson3 simple parsing failed for: {text}. Error: {str(e)}")
-        return None
+
+    try:
+        return json5.loads(text)
+    except ValueError as e:
+        logging.error(f"{my_name()}: json5 parsing failed for: {text}. Error: {str(e)}")
+    
+    try:
+        # demjson3 can attempt to repair and parse malformed JSON
+        return demjson3.decode(text)
+    except demjson3.JSONDecodeError as e:
+        logging.error(f"{my_name()}: demjson3 simple parsing failed for: {text}. Error: {str(e)}")
+    
+    return None
 
 
 
@@ -603,33 +678,36 @@ class TeamworkFlow(Flow):
         result = dict_from_str(response, Pydantic_format=QueryAnalysisFormat)
         
         if result is None:
-            logging.error(f"\n{my_name()}: Leader LLM failed to analyze the query")
-            inform_user("Leader LLM failed to analyze the query", severity = "ERROR")
-            raise RuntimeError(f"\n{my_name()}: Leader LLM failed to analyze the query. Execution will be stopped")      
-        
-        query_type = result["query_type"].upper()
-        if query_type not in QUERY_TYPES:
-            logging.warning(f"{my_name()}: Invalid query_type '{query_type}', defaulting to 'OTHER'")
-            query_type = "OTHER"
-        self.state["analysis_state"]["query_type"] = query_type
-        self.state["analysis_state"]["criteria"] = QUERY_TYPES[query_type]
-        # self.state["analysis_state"]["criteria"] = result.criteria           # let the LLM override criteria in future 
-        
-        # create the recommended TOOLS:
-        recommended_tools_names = result["recommended_tools"]  # list of tools names
-        for tool_name in recommended_tools_names:      
-            if tool_name not in AVAILABLE_TOOLS.keys():
-                logging.error(f"{my_name()}: Unknown tool recommended '{tool_name}'")
-                inform_user(f"Unknown tool recommended '{tool_name}'", severity = "ERROR")
-                continue
-            tool = AVAILABLE_TOOLS[tool_name]["tool_factory"]()
-            self.tools.append(tool)
-            self.tools_names.append(tool_name)
-            logging.info(f"{my_name()}: Added tool: {tool_name}")
+            logging.error(f"\n{my_name()}: Leader LLM failed to analyze the query.")
+            inform_user("Leader LLM failed to analyze the query. Falling back to a generic type 'OTHER'.", severity = "ERROR")
+            self.state["analysis_state"]["query_type"] = query_type
+            self.state["analysis_state"]["criteria"] = QUERY_TYPES[query_type]
+            self.tools = []
+            self.tools_names = []
+            # raise RuntimeError(f"\n{my_name()}: Leader LLM failed to analyze the query. Execution will be stopped")      
+        else:
+            query_type = result["query_type"].upper()
+            if query_type not in QUERY_TYPES:
+                logging.warning(f"{my_name()}: Invalid query_type '{query_type}', defaulting to 'OTHER'")
+                query_type = "OTHER"
+            self.state["analysis_state"]["query_type"] = query_type
+            self.state["analysis_state"]["criteria"] = QUERY_TYPES[query_type]
+            # self.state["analysis_state"]["criteria"] = result.criteria           # let the LLM override criteria in future 
+            
+            # create the recommended TOOLS:
+            recommended_tools_names = result["recommended_tools"]  # list of tools names
+            for tool_name in recommended_tools_names:      
+                if tool_name not in AVAILABLE_TOOLS.keys():
+                    logging.error(f"{my_name()}: Unknown tool recommended '{tool_name}'")
+                    inform_user(f"Unknown tool recommended '{tool_name}'", severity = "ERROR")
+                    continue
+                tool = AVAILABLE_TOOLS[tool_name]["tool_factory"]()
+                self.tools.append(tool)
+                self.tools_names.append(tool_name)
+                logging.info(f"{my_name()}: Added tool: {tool_name}")
 
        
         # Create agents:  
-        
         agent_models = AGENT_MODELS
         for model_name in agent_models:
             agent, agent_name = create_agent_from_name(model_name, AGENT_BASE_NAME, self.tools)
@@ -959,7 +1037,8 @@ if __name__ == "__main__":
     #query = "Напишите смешную историю о молодом крокодиле, который спасает принцессу из замка (не более 300 слов)"
     #query = "What time is it now?"
     #query = "Резюмируйте содержание видео: https://www.youtube.com/watch?v=JGwWNGJdvx8"
-    query = "summarize the content of the website: https://www.epam.com as of today (March 2025)"
+    # query = "summarize the content of the website: https://www.epam.com as of today (March 2025) and present the EPAM latest stock price"
+    query = "please find the latest information on Leo Lozner. Hint - he is related to EPAM"
     #query = (f"write a python program that calculates the factorial of 'n'. Run it in a Python interpreter to make sure it works properly. "  
     #        f"Inform me how you tested it")
     flow = TeamworkFlow(query)
