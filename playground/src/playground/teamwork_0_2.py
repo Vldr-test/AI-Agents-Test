@@ -18,6 +18,7 @@ from crewai.llm import LLM as CrewAILLM
 from pydantic import BaseModel, ValidationError  
 import asyncio
 from typing import Type, List, Dict, Optional
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 import streamlit as st
 
@@ -56,7 +57,7 @@ my_name = lambda: inspect.currentframe().f_back.f_code.co_name
 
 
 # Global definition of a leader
-LEADER_MODEL = "gpt-4" # "gpt-3.5-turbo"  # Can be changed to any model
+LEADER_MODEL = "gemini/gemini-2.0-flash"  # Can be changed to any model like openai/gpt-3.5-turbo
 
 LEADER_BASE_NAME = "LEAD" 
 AGENT_BASE_NAME = "AGNT"   
@@ -64,97 +65,33 @@ AGENT_BASE_NAME = "AGNT"
 # These are the names of models we would like to use for generating responses (and later, peer reviews)
 AGENT_MODELS = [
     # "gpt-4",
-    "gpt-3.5-turbo",
-    "anthropic/claude-3-haiku-20240307",    # this format is required 
-    "gemini/gemini-2.0-flash",              # this format is required 
-    "xai/grok"
+    "openai/gpt-4",
+    "anthropic/claude-3-5-sonnet-latest",     
+    "gemini/gemini-2.0-flash",              
+    "deepseek/deepseek-chat" 
+    # "deepseek/deepseek-reasoner"   doesn't work as expected 
 ]
 
-JSON_ENFORCEMENT_MAP = {
-    "gpt-4": {
-        "generic_json": {
-            "parameter": "response_format",
-            "value": {"type": "json_object"}
-        },
-        "specific_schema": {
-            "parameter": "response_format",
-            "value": {"type": "json_schema", "json_schema": "{schema}", "strict": True}
-        }
-    },
-    "gpt-3.5-turbo": {
-        "generic_json": {
-            "parameter": "response_format",
-            "value": {"type": "json_object"}
-        },
-        "specific_schema": {
-            "parameter": "response_format",
-            "value": {"type": "json_schema", "json_schema": "{schema}", "strict": True}
-        }
-    },
-    "anthropic/claude-3": None,
-    "anthropic/claude-2": None,
-    "gemini/gemini-1.5": {
-        "generic_json": {
-            "parameter": "generation_config",
-            "value": {"response_mime_type": "application/json"}
-        },
-        "specific_schema": {
-            "parameter": "generation_config",
-            "value": {"response_mime_type": "application/json", "response_schema": "{schema}"}
-        }
-    },
-    "gemini/gemini-2.0-flash": {
-        "generic_json": {
-            "parameter": "generation_config",
-            "value": {"response_mime_type": "application/json"}
-        },
-        "specific_schema": {
-            "parameter": "generation_config",
-            "value": {"response_mime_type": "application/json", "response_schema": "{schema}"}
-        }
-    },
-    "xai/grok": {
-        "generic_json": {
-            "parameter": "response_format",
-            "value": {"type": "json_object"}
-        },
-        "specific_schema": {
-            "parameter": "response_format",
-            "value": {"type": "json_schema", "json_schema": "{schema}", "strict": True}
-        }
-    },
-    "llama-3": None,
-    "deepseek-chat": {
-        "generic_json": {
-            "parameter": "response_format",
-            "value": {"type": "json_object"}
-        },
-        "specific_schema": None
-    },
-    "deepseek-coder": {
-        "generic_json": {
-            "parameter": "response_format",
-            "value": {"type": "json_object"}
-        },
-        "specific_schema": None
-    }
-}
 
 
 MODEL_PROVIDER_MAP = {
     "gpt-": "openai",
+    "openai/": "openai",
+    "google/": "google",
     "gemini/": "google",
     "anthropic/": "anthropic",
-    "xai/": "xai"
+    "xai/": "xai",
+    "deepseek/": "deepseek"
     # in future, add DeepSeek, etc.
 }
 
-
+# temperature is just a default one, will be set separately after the QUERY_TYPE is known 
 LLM_PROVIDERS = {
-    "openai": {"api_key": os.getenv("OPENAI_API_KEY"), "env_var": "OPENAI_API_KEY", "llm_class": ChatOpenAI, "temperature": 0.7},
+    "openai": {"api_key": os.getenv("OPENAI_API_KEY"), "env_var": "OPENAI_API_KEY", "llm_class": CrewAILLM, "temperature": 0.7},
     "google": {"api_key": os.getenv("GOOGLE_API_KEY"), "env_var": "GOOGLE_API_KEY", "llm_class": CrewAILLM, "temperature": 0.7},
     "anthropic": {"api_key": os.getenv("ANTHROPIC_API_KEY"), "env_var": "ANTHROPIC_API_KEY", "llm_class": CrewAILLM, "temperature": 0.7},
-    "xai": {"api_key": os.getenv("XAI_API_KEY"), "env_var": "XAI_API_KEY", "llm_class": CrewAILLM, "temperature": 1.0}
+    "xai": {"api_key": os.getenv("XAI_API_KEY"), "env_var": "XAI_API_KEY", "llm_class": CrewAILLM, "temperature": 0.7},
+    "deepseek": {"api_key": os.getenv("DEEPSEEK_API_KEY"), "env_var": "DEEPSEEK_API_KEY", "llm_class": CrewAILLM, "temperature": 0.7 }
 }
 
 QUERY_TYPES = {
@@ -166,6 +103,84 @@ QUERY_TYPES = {
     "REAL_TIME_DATA_QUERY": ["accuracy", "factual_correctness"],
     "OTHER": ["quality"]    # will be filled in dynamically 
 }
+
+QUERY_TYPES_TEMPERATURE = {
+    "CREATIVE_WRITING": {
+        "openai": 0.9,       # high creativity recommended 
+        "google": 0.9,       # higher end (0.7-1.0) for creative tasks 
+        "anthropic": 1.0,    # closer to 1.0 for generative tasks 
+        "deepseek": 1.5,     # official recommendation for creative writing
+        "xai": 1.0,          # no official value; high (range 0-1) for creativity
+        "meta": 1.0,         # up to 1.0 (default 0.9) for more diverse output 
+        "mistral": 0.8       # higher end (default 0.7) for creative output 
+    },
+    "SOFTWARE_PROGRAMMING": {
+        "openai": 0.0,       # use 0 for deterministic code generation
+        "google": 0.0,       # low (0-0.3) for deterministic outputs like code 
+        "anthropic": 0.0,    # closer to 0 for analytical tasks  
+        "deepseek": 0.0,     # coding/math recommended at 0.0 
+        "xai": 0.0,          # no official data; assume near 0 for code accuracy 
+        "meta": 0.0,         # no official; community uses ~0 for coding 
+        "mistral": 0.0       # no official; use near 0 for correct code (Nemo uses 0.3)  
+    },
+    "MATH": {
+        "openai": 0.0,       # 0-0.2 for focused tasks like math""
+        "google": 0.0,       # treat like classification  
+        "anthropic": 0.0,    # analytical task  
+        "deepseek": 0.0,     # math grouped with coding at 0.0 
+        "xai": 0.0,          # no official; likely 0 for precise calculation 
+        "meta": 0.0,         # no official; low temp for deterministic output 
+        "mistral": 0.0       # no official; low temp to avoid errors 
+    },
+    "TRANSLATION": {
+        "openai": 0.0,       # no explicit value; ~0-0.2 for faithful translation 
+        "google": 0.0,       # no explicit; use low (0-0.3) for deterministic tasks 
+        "anthropic": 0.0,    # no explicit; treat as analytical -> low temp 
+        "deepseek": 1.3,     # recommended higher temperature for translation 
+        "xai": 0.0,          # no official; presumably low to stick to source text 
+        "meta": 0.0,         # no official; low temp to avoid mistranslation (default 0.9) 
+        "mistral": 0.0       # no official; low temp for literal accuracy 
+    },
+    "SUMMARIZATION": {
+        "openai": 0.2,       # generally keep low for factual summary (0-0.3) 
+        "google": 0.2,       # start low (~0.2), increase if summary too generic 
+        "anthropic": 0.2,    # no explicit; low for accurate summaries (Claude default 1.0) 
+        "deepseek": 1.0,     # not given; ~1.0 used for data analysis tasks (proxy) 
+        "xai": 0.0,          # no official; assume low for coherence (decisive mode) 
+        "meta": 0.0,         # no official; likely low to avoid hallucination 
+        "mistral": 0.3       # Mistral Nemo-Instruct recommends 0.3 for guided tasks 
+    },
+    "REAL_TIME_DATA_QUERY": {
+        "openai": 0.0,       # use 0 to avoid creativity when using external data 
+        "google": 0.0,       # no direct quote; best to use 0 for RAG to ensure accuracy 
+        "anthropic": 0.0,    # no explicit; assumed 0 to stick strictly to retrieved info 
+        "deepseek": None,    # not specified by DeepSeek (likely would be low)
+        "xai": None,         # not specified by xAI (likely low for accuracy)
+        "meta": None,        # not specified by Meta (community uses 0 for RAG)
+        "mistral": None      # not specified by Mistral (usually set ~0 for RAG)
+    },
+    "CLASSIFICATION": {
+        "openai": 0.0,       # 0 for deterministic classification 
+        "google": 0.0,       # Google recommends temp=0 for classification tasks 
+        "anthropic": 0.0,    # analytical/multiple-choice -> temp ~0 
+        "deepseek": 0,       # no specific guidance (would default to 0)
+        "xai": 0,            # no specific guidance (likely 0)
+        "meta": 0,           # no specific guidance (likely 0)
+        "mistral": 0.1       # no specific guidance (likely low)
+    },
+    "OTHER": {
+        "openai": 1.0,       # default API temperature is 1.0 
+        "google": 0.7,       # default ~1.0 for models (but best practice start ~0.2) 
+        "anthropic": 1.0,    # default is 1.0 (range 0-1) 
+        "deepseek": 1.0,     # default 1.0, but general conversation mode uses 1.3 
+        "xai": 0.7,          # default not explicitly mentioned (range 0-1) 
+        "meta": 0.9,         # default temperature for LLaMA models is 0.9 
+        "mistral": 0.3       # default 0.7; Nemo-Instruct model recommends 0.3 
+    }
+}
+
+
+
 
 SELF_REVIEW = False    # if set to True, agents will review their own work :) 
 
@@ -216,7 +231,8 @@ class AgentResponseFormat(BaseModel):
 class QueryAnalysisFormat(BaseModel):
   query_type: str
   # criteria: List[str]
-  recommended_tools: Optional[List[str]] = None  # this is for future when we will start using tools 
+  recommended_tools: Optional[List[str]] = None    
+  edited_query: Optional[str] = None             # this is for future when we will change both query and temperature based on the query_type 
 
 #--------------------------------------------------------------------------------------------------------------------------
 
@@ -292,11 +308,12 @@ def get_peer_review_prompt(query, responses, criteria):
     )
 
 
-def get_second_pass_prompt(query, criteria, winner_response, improvement_points):
+def get_second_pass_prompt(query, criteria, winner_response, improvement_points, user_feedback = None):
     return ( 
-        f"Based on the query '{query}' and the criteria {', '.join(criteria)}, improve the following response:\n"
+        f"Based on the initial query '{query}' and the criteria {', '.join(criteria)}, improve the following original response:\n"
             f"{winner_response}\n"
-            f", taking the following improvement points into account: {', '.join(improvement_points)}\n"
+            f"Take into account the following improvement points into account: {', '.join(improvement_points)},\n"
+            f", and also user's feedback on the original response and improvement points: {user_feedback}\n"
             f"Compare your new response to the original and make sure that your new response is better than the original.\n"
             f"Rework your new response if required, until it is better than the original.\n"
             f"Return the response as a plain string — no Unicode escape characters like '\\u0412': you should use 'В' instead of '\\u0412'. "
@@ -375,6 +392,7 @@ def create_agent_name(model_name, base_name=""):
         return None, None
     return provider_name, f'{base_name}-{provider_name.upper()}-{model_name}' 
 
+
 #---------------------------------------------------------- SHORT_NAME() -------------------------------------------------------
 def short_name(agent_name):
     """Extracts the short model name from a full agent name"""
@@ -401,9 +419,11 @@ def short_name(agent_name):
 
 #--------------------------------------------------- CREATE_AGENT_FROM_NAME() -------------------------------------------
  
-def create_agent_from_name(model_name, base_name="", tools=None):
+def create_agent_from_name(model_name, base_name="", query_type = None, tools=None):
     """ Accepts model_name. Returns an initialized agent + a unique agent's name """
+    
     provider, agent_name = create_agent_name(model_name, base_name)
+    
     if not provider:
         logging.error(f"Unknown provider for model: {model_name}")
         return None, None
@@ -416,34 +436,16 @@ def create_agent_from_name(model_name, base_name="", tools=None):
         logging.error(f"Missing API key ({config['env_var']}) in .env for {provider}")
         return None, None
     try:
-        
-        # trying to enforce generic JSON output wherever possible:  
-
+    
         # Set up LLM parameters
         llm_params = {
             "model": model_name,
             "api_key": config["api_key"],
-            "temperature": config["temperature"],
-            "model_kwargs": {}  # Explicitly initialize model_kwargs
+            "temperature" : QUERY_TYPES_TEMPERATURE[query_type][provider] if query_type else config["temperature"]
         }
 
-         
-        # Check if the model supports JSON output
-        json_config = JSON_ENFORCEMENT_MAP.get(model_name, {}).get("generic_json", {})
-
-        if json_config:
-            # Example: For OpenAI, this might set {"response_format": {"type": "json_object"}}
-            
-            parameter = json_config["parameter"]
-            value = json_config["value"]
-            llm_params["model_kwargs"][parameter] = value
-            logging.error(f"JSON enforcement enabled for {model_name}. llm_params: {llm_params}")
-        else: 
-            del llm_params["model_kwargs"]
-
-        
         llm = config["llm_class"](**llm_params)
-
+        
         agent = Agent(
             role="agent",
             goal="Generate responses and review others' responses.",
@@ -515,7 +517,8 @@ async def exec_async(agents, agent_names, prompt, expected_output):
         task = Task(
             description=prompt, 
             agent=agent,
-            expected_output=expected_output
+            expected_output=expected_output,
+            output_format = 'json'
         )
         
         # create a new pseudo-crew:
@@ -538,7 +541,7 @@ async def exec_async(agents, agent_names, prompt, expected_output):
             # task = tasks[i]  # Get the original task from the list
             agent_name = agent_names[i] 
             logging.error(f"{my_name()}: Task raised an exception for {agent_name} : {result}")
-            inform_user(f"Task {i} for {agent_name} failed to execute {agent_name}", severity="ERROR")
+            inform_user(f"Task {i} for {agent_name} failed to execute", severity="ERROR")
         else:
             results.append(result)
          
@@ -600,10 +603,10 @@ def cleanup_json_re(text: str) -> str:
 def json_to_dict(text: str) -> Optional[dict]:
     """Converts a potentially malformed JSON string from LLM output into a dictionary or None."""
     
-    # text = text.replace("```json", "").replace("```", "").strip()
+    text = text.replace("```json", "").replace("```", "").strip()
     
     # Simple repair: if it starts with '{' but doesn't end with '}', append '}'. This is an ugly manual hack :( 
-    # if text.startswith('{') and not text.endswith('}'): text += '}'
+    if text.startswith('{') and not text.endswith('}'): text += '}'
     
     # first try it simple: 
     try:
@@ -710,7 +713,7 @@ class TeamworkFlow(Flow):
         # Create agents:  
         agent_models = AGENT_MODELS
         for model_name in agent_models:
-            agent, agent_name = create_agent_from_name(model_name, AGENT_BASE_NAME, self.tools)
+            agent, agent_name = create_agent_from_name(model_name, AGENT_BASE_NAME, query_type= query_type, tools = self.tools)
             if agent is None:  
                 logging.warning(f"Skipping {model_name} because the agent could not be created.")
                 inform_user(f"Skipping {model_name} because the agent could not be created.", severity ="WARNING")
@@ -969,13 +972,16 @@ class TeamworkFlow(Flow):
 
         inform_user(f"Starting the second pass for the winner {winner_name}. Points for improvement recommended by peers:", data = winner_improvement_points)
 
+        user_feedback = input("\nPlease provide your comments on the text and improvement points and / or press Enter to continue:")
+
 
         # create a new task and a new pseudo-crew for the winner:
         task_prompt = get_second_pass_prompt(
             query=self.state["query"],
             criteria=self.state["analysis_state"]["criteria"],
             winner_response=winner_response, 
-            improvement_points=winner_improvement_points
+            improvement_points=winner_improvement_points, 
+            user_feedback=user_feedback
         )
 
         task = Task(
@@ -1053,31 +1059,4 @@ if __name__ == "__main__":
 
     logging.info(f"Final state: {flow.state}")    
   
-"""
-    # presenting final results: 
 
-    if USE_STREAMLIT:
-
-        st.title("Teamwork Flow")
-            
-        if st.button("Run"):
-            st.subheader("Winner")
-            winner = final_state["winner"]
-            st.write(f"**Agent**: {short_name(winner['winner'])}")
-            st.write(f"**Score**: {winner['winner_score']}")
-            st.write("**Story**:")
-            st.write(winner['winner_response'])
-            peer_scores = final_state.get("peer_review_scores")
-            st.table(peer_scores)
-        else:
-            st.error("No result")
-    else:
-        winner = final_state["peer_review_state"]["winner"]
-        print(f"Winner: {short_name(winner['winner'])}")
-        print(f"Score: {winner['winner_score']}")
-        print("Story:")
-        print(winner['winner_response'])
-        peer_scores = final_state.get("peer_review_scores", {})
-        if peer_scores:
-            print(peer_scores)"
-"""
