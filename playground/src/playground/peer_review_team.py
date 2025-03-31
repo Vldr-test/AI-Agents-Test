@@ -1,8 +1,8 @@
 # peer_review_team.py
 
 import peer_review_config as cfg
-from peer_review_config import AVAILABLE_TOOLS,QueryAnalysisFormat, SimpleResponseFormat, PeerReviewResponseFormat, my_name
-from peer_review_prompts import get_query_analysis_prompt, get_response_generation_prompt, get_peer_review_prompt, get_iterations_prompt
+from peer_review_config import AVAILABLE_TOOLS, USE_REAL_THREADS, QueryAnalysisFormat, SimpleResponseFormat, PeerReviewResponseFormat, ImprovementPointsFormat, my_name
+from peer_review_prompts import get_query_analysis_prompt, get_response_generation_prompt, get_peer_review_prompt, get_iterations_prompt, get_review_improvement_points_prompt
 from peer_review_utils import dict_from_str 
 
 import time
@@ -13,6 +13,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 #from langchain_anthropic import ChatAnthropic
 #from langchain_community.chat_models import ChatOpenAI
 import asyncio
+if USE_REAL_THREADS: from concurrent.futures import ThreadPoolExecutor 
 from langchain_core.language_models import BaseChatModel
 
 from pydantic import BaseModel, ValidationError
@@ -151,23 +152,30 @@ class AgentTeam:
         """
         # Initialize an empty dictionary to store model responses
         responses = {}
-        
+        loop = asyncio.get_running_loop()
+        executor = ThreadPoolExecutor(max_workers=len(agents)) if USE_REAL_THREADS else None
+
         # Log the query details for debugging
         logging.info(f"{my_name()}: starting")
 
-        # Define the helper function to call a model asynchronously and return its name and response
-        # required to bind responses to model names 
+        # Define the helper function to call a model asynchronously and return its name and response.
+        # Required to bind responses to model names 
         #--------------------------------------------------------------
         async def call_model(agent):
             # Get the model's name
-            name = get_model_name(agent)
-            
+            name = get_model_name(agent)       
+            start_time = time.time()
             # Log that we're calling this model
             logging.info(f"{my_name()}: calling model {name}")
             
             # Try to get the response from the model
             try:
-                response = await agent.ainvoke(input=prompt)
+                if USE_REAL_THREADS:
+                    response = await loop.run_in_executor(executor, lambda: agent.invoke(prompt))
+                else:
+                    response = await agent.ainvoke(input=prompt)
+                end_time = time.time()
+                logging.info(f"{my_name()}: model {name} started at {start_time}. Execution took {end_time - start_time} seconds")
                 return name, response
             except Exception as e:
                 # Log any errors that occur during the model call
@@ -193,8 +201,11 @@ class AgentTeam:
             else:
                 logging.error(f"{my_name()}: No response from {name}")
 
+        if USE_REAL_THREADS:
+            executor.shutdown(wait=True)
+        
         total_processing_time = time.time() - start_time
-        logging.info(f"{my_name()}\n completed in {total_processing_time} seconds")
+        logging.info(f"{my_name()}\n started at {start_time}. Completed in {total_processing_time} seconds")
 
         # Return the dictionary of model responses
         return responses
@@ -227,7 +238,8 @@ class AgentTeam:
 
         try:
             reviews = asyncio.run( self.async_generate_responses(
-                    agents=self.agent_models + [self.leader_model],  # we can also ask the Leader to review 
+                    # we ask the Leader to review - but only if same model is not there already 
+                    agents=self.agent_models + [self.leader_model if not self.leader_model in self.agent_models else None],  
                     prompt=peer_review_prompt,
                     )
             )
@@ -259,11 +271,42 @@ class AgentTeam:
             raise RuntimeError("No peer reviews available") 
         else:
             return parsed_reviews 
+        
+#====================================================================
+#------------------- _REVIEW_IMPROVEMENT_POINTS() -------------------
+#====================================================================
+    def _review_improvement_points(self, query: str, improvement_points: List[str])-> List[str]:
+        """
+            rationalize improvement points 
+            return the improved list
+        """
+        logging.info(f"{my_name()}: starting")
+        prompt = get_review_improvement_points_prompt(query, improvement_points)
+
+        response = ""
+
+        try:
+            response = self.leader_model.invoke(input=prompt)
+            logging.info(f"{my_name()}: prompt {prompt}. \n response from leader model: {response.content}")
+            
+            # Parse the string response into a list using dict_from_str with RootModel
+            parsed_response = dict_from_str(response.content, ImprovementPointsFormat)
+            if parsed_response is None:
+                logging.error(f"{my_name()}: Failed to parse improvement points: {response.content}")
+                return improvement_points  # Fallback to original points
+        
+            # Return the list of strings directly from the root
+            return parsed_response.root
+            
+        except ValidationError as e:
+            logging.error(f"{my_name()}: error: {e}")
+            return ""        
+
 
 #====================================================================
 #----------------------- ANALYZE_PEER_REVIEWS() ---------------------
 #====================================================================
-    def analize_peer_reviews(self, peer_reviews: PeerReviewResponseFormat)->Tuple[dict, str, int, List[str]]:
+    def analize_peer_reviews(self, query: str, peer_reviews: PeerReviewResponseFormat)->Tuple[dict, str, int, List[str]]:
         """
             Accepts PeerReviewsRepsonseFormat object: {reviewing_agent: {'reviewed_agent': {improvement_points, score}}
             Calculates the averages and finds the winner. 
@@ -295,7 +338,10 @@ class AgentTeam:
         # find the winner with the highest avg:  
         winner = max(avg_scores, key=avg_scores.get)
         winner_avg_score = avg_scores[winner]
-        winner_improvement_points = improvement_points_table[winner]
+
+        # enhance improvement points list:
+        winner_improvement_points = self._review_improvement_points(
+            query = query, improvement_points = improvement_points_table[winner])
 
         logging.info(f"\n{my_name()}: winner: {winner}, winner_avg_score: {winner_avg_score}")
         logging.info(f"\n{my_name()}: improvement_points type: {type(winner_improvement_points)}")
@@ -304,14 +350,14 @@ class AgentTeam:
         return avg_scores, winner, winner_avg_score, winner_improvement_points
             
     #====================================================================
-    #------------------generate_iterative_improvement() -----------------
+    #------------------GENERATE_ITERATIVE_IMPROVEMENT() -----------------
     #====================================================================    
     def generate_iterative_improvement(
         self, 
         query: str, 
         criteria:list[str], 
         improvement_points:list[str], 
-        response: dict, 
+        response: str, 
         user_feedback: str = None
         )-> SimpleResponseFormat:    
         """
@@ -325,8 +371,7 @@ class AgentTeam:
         responses = asyncio.run(self.async_generate_responses(self.agent_models, prompt))
 
         # no Json validation required, as this is just initial responses in free text 
-
-        logging.info(f"{my_name()}\n completed with {responses} ")
+        logging.info(f"{my_name()}\n completed with prompt {prompt} and responses: {responses} ")
 
         return responses
     

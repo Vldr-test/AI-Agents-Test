@@ -202,7 +202,7 @@ def generating_responses_in_progress():
                 
             else:  # we are in the next iteration already: 
                 logging.info(f"{my_name()}: Iteration {ss.iteration}")
-                ss.team.generate_iterative_improvement( 
+                ss.responses = ss.team.generate_iterative_improvement( 
                     query = ss.query, 
                     criteria = ss.criteria, 
                     improvement_points = ss.winner_improvement_points, 
@@ -275,13 +275,14 @@ def peer_review_done():
     (ss.avg_scores, 
     ss.winner_name, 
     ss.winner_avg_score, 
-    ss.winner_improvement_points) = ss.team.analize_peer_reviews(ss.peer_reviews)
+    ss.winner_improvement_points) = ss.team.analize_peer_reviews(ss.query, ss.peer_reviews)
     
     logging.info(f"{my_name()}: Winner: {ss.winner_name} {ss.winner_avg_score} {ss.winner_improvement_points}")
     
     ss.winner_response = ss.responses.get(ss.winner_name, "ERROR")
     
     st.write(f"**Winner:** {ss.winner_name}")
+    st.write(f"**Average Scores:** {ss.avg_scores}")
     st.write(f"**Winner Average Score:** {ss.winner_avg_score}")
     st.write(f"**Winner Response:** {ss.winner_response}")
     improvement_points_str = '\n'.join(f"- {point}" for point in ss.winner_improvement_points)
@@ -331,17 +332,19 @@ def main(query: Optional[str] = None):
 #====================================================================
 if __name__ == "__main__":
     # Test queries for debugging
+    query = (f"Найдите в сети последние отзывы сотрудников и клиентов о компании 'Системные Технологии', Калининград. "
+             f"Выведите статистику результатов и суммируйте их")
     #query = "Напишите смешную историю о молодом крокодиле, который спасает принцессу из замка (не более 300 слов)"
     #query = "What time is it now?"
     #query = "Резюмируйте содержание видео: https://www.youtube.com/watch?v=JGwWNGJdvx8"
     #query = "summarize the content of the website: https://www.epam.com as of today (March 2025) and present the EPAM latest stock price"
     #query = "please find the latest information on Leo Lozner. Hint - he is related to EPAM"
-    #query = (f"write a python program that calculates the factorial of 'n'. Run it in a Python interpreter to make sure it works properly.")
+    #query = (f"write a python program that calculates the factorial of 'n'. If possible, run it in a Python interpreter to make sure it works properly.")
     #query = (f"пожалуйста, переведите на русский: \n"
     #         f"მ ი ნ დ ო ბ ი ლ ო ბ ა"
     #         f"რუპო ზალმანი პ/ნ 01391057335 და ულიანა შმიდ 01591057979 როგორც   ს/კ 01.16.01.007.003.01.01.007 უძრავი ქონების (ბინა) თანამესაკუთრეები, ოთარი ნარჩემაშვილს პ/ნ 01007015722 და გიორგი ჭიჭინაძეს პ/ნ 01001067259 ვანიჭებ უფლებამოსილებას მასზედ, რომ დაიცვან და წარმოადგინონ ჩვენი ინტერესები ქალაქ თბილისის მუნიციპალიტეტის მერიაში და მის სტრუქტურულ ერთეულებში, ქალაქ თბილისის მუნიციპალიტეტის სსიპ თბილისის მუნიციპალიტეტის არქიტექტურის სამსახურში და სხვა ადმინისტრაციულ ორგანოებში, ჩვენ თანასაკუთრებაში არსებული ბინის გამიჯვნის/გაყოფის მიზნით. მინდობილი პირები ერთად ან               ცალ-ცალკე უფლებამოსილნი არიან წინამდებარე მიზნის მისაღწევად წარადგინონ განცხადება, წერილობითი შეტყობინება, შესაბამისი დოკუმენტაცია, მონაწილეობა მიიღონ სხდომებში, მოითხოვონ შესაბამისი ნებართვების, თანხმობების მოპოვება."
     #         f" მინდობილი პირები წინამდებარე მიზნის მისაღწევად უფლებამოსილნი არიან განახორციელონ კანონმდებლობით აუკრძალავი ნებისმიერი მოქმედებები.\n"
     #         f"მინდობილობა გაცემულია წინამდებარე დავალების შესრულებამდე.")"
-    query = "Напишите короткий стих о пьяном роботе"
+    #query = "Напишите короткий стих о пьяном роботе"
 
     main(query)
