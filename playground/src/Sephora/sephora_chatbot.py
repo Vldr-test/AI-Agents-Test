@@ -174,6 +174,7 @@ def setup_rag_chain(llm_model: str, vector_store_path: str)-> AgentExecutor:
             return None
     else:
         logging.error(f"{my_name()} Vector store not found. Please create the vector store first.")
+        explore_env()
         return None 
     
     #-------------------------------------------------------------------------------- 
