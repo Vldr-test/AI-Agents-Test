@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 
 import inspect
 from langchain.tools import Tool
-import requests
+
 import streamlit as st
 
 
@@ -146,6 +146,22 @@ def setup_rag_chain(llm_model: str, vector_store_path: str)-> AgentExecutor:
     #-------------------------------------------------------------------------------- 
     #----------------------- CONNECT TO THE VECTOR STORE: ---------------------------
     #-------------------------------------------------------------------------------- 
+    
+    def explore_env():
+        path_to_check = VECTOR_STORE_PATH:
+        parent_dir = os.path.dirname(path_to_check) if path_to_check != "" else "."
+        if os.path.exists(parent_dir):
+            contents = os.listdir(parent_dir)
+            logging.error(f"{my_name()} content of parent directory ('{parent_dir}')")
+            st.write(f"Listing contents of the parent directory ('{parent_dir}'):")
+            for item in contents:
+                st.write(f"- {item}")
+                logging.error(f"- {item}")
+        else:
+            logging.error(f"{my_name()} env: The parent directory '{parent_dir}' does not exist.")
+            st.write(f"The parent directory '{parent_dir}' also does not exist.")
+
+    #--------------------------------------------------------------------------------
     if os.path.exists(vector_store_path):
         try:
             embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
@@ -154,6 +170,7 @@ def setup_rag_chain(llm_model: str, vector_store_path: str)-> AgentExecutor:
             logging.info(f"\n Vector store loaded in {time.time() - start_time} seconds.")
         except Exception as e:
             logging.error(f"{my_name()}: Error loading vector store: {e}")
+            explore_env()
             return None
     else:
         logging.error(f"{my_name()} Vector store not found. Please create the vector store first.")
