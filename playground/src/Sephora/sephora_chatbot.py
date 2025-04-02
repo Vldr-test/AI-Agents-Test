@@ -36,7 +36,8 @@ import streamlit as st
 #==============================================================================================
 # File paths
 JSONL_FILE: str = r"C:\Users\Vladi_Ruppo\Downloads\skincare_parsed.jsonl"
-VECTOR_STORE_PATH: str = r"C:\Users\Vladi_Ruppo\Downloads\faiss_index"
+# VECTOR_STORE_PATH: str = r"C:\Users\Vladi_Ruppo\Downloads\faiss_index"
+VECTOR_STORE_PATH: str = "faiss_index"
 
 RAG_RESULTS = 7
 
