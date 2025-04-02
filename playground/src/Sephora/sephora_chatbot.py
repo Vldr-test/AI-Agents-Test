@@ -159,8 +159,8 @@ def setup_rag_chain(llm_model: str, vector_store_path: str)-> AgentExecutor:
         else:
             logging.error(f"{my_name()} env: The parent directory '{parent_dir}' does not exist.")
             st.write(f"The parent directory '{parent_dir}' also does not exist.")
-
     #--------------------------------------------------------------------------------
+
     if os.path.exists(vector_store_path):
         try:
             embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
@@ -169,11 +169,11 @@ def setup_rag_chain(llm_model: str, vector_store_path: str)-> AgentExecutor:
             logging.info(f"\n Vector store loaded in {time.time() - start_time} seconds.")
         except Exception as e:
             logging.error(f"{my_name()}: Error loading vector store: {e}")
-            explore_env()
+            explore_env(vector_store_path)
             return None
     else:
         logging.error(f"{my_name()} Vector store not found. Please create the vector store first.")
-        explore_env()
+        explore_env(vector_store_path)
         return None 
     
     #-------------------------------------------------------------------------------- 
