@@ -1,21 +1,34 @@
 # sephora_chatbot.py
 
 import logging
-from typing import List, Dict, Optional, Union, Tuple
+from typing import List, Dict, Optional, Union, Tuple, Any
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.chat_models import init_chat_model
-from langchain.memory import ConversationBufferMemory
-from langchain.chains import ConversationalRetrievalChain
-from langchain.prompts import PromptTemplate
+
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+ 
+from langgraph.checkpoint.memory import MemorySaver
+from langchain_community.tools import TavilySearchResults
+
+
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langgraph.prebuilt import create_react_agent
+from langchain_core.runnables import RunnableConfig
+
+
 from langchain.agents import initialize_agent, AgentType, AgentExecutor
 import time
 import os
 from dotenv import load_dotenv
+
 import inspect
 from langchain.tools import Tool
 import requests
 import streamlit as st
+
+
 
 
 #==============================================================================================
@@ -29,7 +42,7 @@ RAG_RESULTS = 7
 
 CHAIN_TYPE = "CHATBOT"    # "STATELESS" or "CHATBOT"
 
-LLM_MODEL = "claude-3-5-sonnet-latest"
+LLM_MODEL = "anthropic:claude-3-5-sonnet-latest"
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 # Configure logging
@@ -41,39 +54,50 @@ my_name = lambda: inspect.currentframe().f_back.f_code.co_name
 #=========================================================================================
 #--------------------------------------- PROMPTS -----------------------------------------
 #=========================================================================================
-assistant_prompt = PromptTemplate.from_template(
+# Create a chat prompt template for system message 
+assistant_prompt = """
+    You are a helpful and friendly AI Product assistant that answers generic questions about 
+    healthcare products, focusing on and prioritizing Sephora products 
+    You work for Sephora, providing concise, clear, and relevant information to its potential customers. 
+    Your name is Marfusha  - a healthcare assistant from Sephora identifying as female
+    
+    - Always speak in a professional, helpful tone.
+    
+    - Only answer based on the provided context — never make up details. 
+      If unsure, say: 'I'm sorry, I'm not sure.'
+    
+    - Find most relevant information about specific Sephora products using the internal search tool. 
+    
+    - NEVER tell or imply that the current year is "2024" - it is wrong! 
+      Always use your Web search tool to check the current date! 
+    
+    - If the user asks  a generic question about modern trends, latest products, 
+      new offerings and discoveries, etc., ALWAYS use your Web search tool.   
+  
+    - Use your Web search tool, when the user asks about Sephora's product, 
+        but there is not enough info from the internal search tool. 
+        If you are using information from the Web search tool, 
+        ALWAYS mention that this information is from the Web - and ALWAYS mention the country(ies)) 
+        your gathered it from! No need to mention Tavily explicitely 
+   
+    - Answer general question without overselling Sephora's products. Do not oversell / push, but 
+      you might find subtle and gentle ways to offer Sephora products naturally. 
+
+    - Never promote competition's products.  
+    
+    - Keep your responses brief and to the point.
+
+    
+    Format:
+    - Always include all relevant information in your final response, even if it was mentioned earlier in the conversation.
+    - Use emojis to add warmth where appropriate.
+    - Use bullet points for clarity.
+    - Use MARKUP to emphasize important text in your reply, such as product names
+    - Whenever relevant, include image links or product URLs in markdown format:
+       - Example image: ![Product Image](https://www.sephora.com/productimages/abc.jpg)
+       - Example link: [View on Sephora](https://www.sephora.com/product/{{product_id}})
     """
-        Previous conversation:
-            ***{chat_history}***
-        
-        You are a helpful and friendly AI Product assistant that answers generic questions about 
-        healthcare products, focusing on and prioritizing Sephora products 
-        You work for Sephora, making sure its customers get concise, clear, and relevant information. 
-
-        - Always speak in a professional, helpful tone.
-        - Only answer based on the provided context — never make up details.
-        - If asked a generic question, you can use the Web search tool. 
-        - If unsure, say: "I’m sorry, I’m not sure."
-        - If available and relevant, include image links or product URLs in markdown format:
-           - Example image: ![Product Image](https://www.sephora.com/productimages/abc.jpg)
-           - Example link: [View on Sephora](https://www.sephora.com/product/{{product_id}})
-        
-        Format:
-        - Use emojis to add warmth where appropriate.
-        - Use bullet points for clarity.
-        - Use markup to emphasize important points 
-        - Keep your responses brief and to the point.
-
-        Use the following pieces of context to answer the question:
-        ***{context}***
-
-        Do NOT explicitly refer to the provided context. Highlight product names or ingredients when useful.
-
-        Question: {question}
-    """
-)
-
-
+ 
 #=========================================================================================
 #--------------------------------------- LOCAL_SEARCH() ----------------------------------
 #=========================================================================================
@@ -86,7 +110,7 @@ def local_search(query: str, retriever)->str:
         str: A string containing relevant product information retrieved from the database, 
              with each document separated by a newline.
     """
-    logging.info(f"{my_name()}, query: {query}")
+    logging.info(f"{my_name()} starting")
 
     # Retrieve relevant documents from the FAISS vector store using its retriever
     docs = retriever.get_relevant_documents(query)
@@ -95,83 +119,11 @@ def local_search(query: str, retriever)->str:
     # Each document's content is separated by a newline for readability
     if docs:
         result = "\n".join([doc.page_content for doc in docs])
-        logging.info(f"{my_name()}, result: {result}")
+        logging.info(f"{my_name()} returning results")
         return result
     else:
         logging.error(f"{my_name()}, no results found")
         return "No matching products found in Sephora’s database."
-
-
-#=========================================================================================
-#------------------------------------ WEB_SEARCH() ---------------------------------------
-#=========================================================================================
-import requests
-import logging
-from dotenv import load_dotenv
-import os
-import streamlit as st
-
-def web_search(query: str) -> str:
-    """
-    Perform a web search using the Serper API to find general skincare information or real-time data.
-    Args:
-        query (str): The user's question or search term (e.g., "current time in New York").
-    Returns:
-        str: A string containing the answer or snippets from the top search results,
-             or a message if no results are found or an error occurs.
-    """
-    logging.info(f"\n{my_name()} query: {query}")
-    
-    # Ensure API key is set
-    if "serper_api_key" not in st.session_state:
-        load_dotenv()
-        st.session_state.serper_api_key = os.getenv("SERPER_API_KEY")
-        if not st.session_state.serper_api_key:
-            logging.error("{my_name()}: SERPER_API_KEY not found in .env file")
-            return "Web search is unavailable due to missing API key."
-    
-    # Define the correct API endpoint
-    url = "https://google.serper.dev/search"
-    
-    # Set headers with API key
-    headers = {
-        "X-API-KEY": st.session_state.serper_api_key
-    }
-    
-    # Set parameters: query and limit to top 3 results
-    params = {"q": query, "num": 4}
-    
-    try:
-        # Send the GET request to the Serper API
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()  # Raise an error for non-200 status codes
-        
-        # Parse the JSON response
-        results = response.json()
-        
-        # Check for answerBox first (for direct answers like time queries)
-        if "answerBox" in results:
-            answer = results["answerBox"].get("answer", "No direct answer found")
-            return answer
-        else:
-            # Fallback to organic results' snippets
-            snippets = [result["snippet"] for result in results.get("organic", [])]
-            if snippets:
-                return "\n".join(snippets)
-            else:
-                return "No results found."
-    
-    except requests.exceptions.RequestException as e:
-        logging.error(f"{my_name()}, web_search, request error: {e}")
-        return "Sorry, I couldn’t retrieve web search results due to a network error."
-    except ValueError as e:
-        logging.error(f"{my_name()}, web_search, JSONDecodeError: {e}, Response: {response.text}")
-        return "Sorry, there was an issue processing the search results."
-    
-    # Alternative: 
-    #   from langchain.utilities import GoogleSerperAPIWrapper
-    #   serper = GoogleSerperAPIWrapper()  # Ensure API key is set in environment or Streamlit secrets
-    #   return serper.run(query)
 
 
 
@@ -209,31 +161,24 @@ def setup_rag_chain(llm_model: str, vector_store_path: str)-> AgentExecutor:
     #-------------------------------------------------------------------------------- 
     #-------------------------------- CREATE LLM MODEL- -----------------------------
     #-------------------------------------------------------------------------------- 
+  
     try:
-        llm = init_chat_model(model=llm_model)
-        logging.info(f"{my_name()}: LLM created for: {llm_model}")
-    except Exception as e:
-        logging.error(f"{my_name()}: Can't create an LLM for: {llm_model}")
-        raise e
-    
-    try:
-        # Create memory object:
-        memory = ConversationBufferMemory(
-            memory_key="chat_history", 
-            return_messages=True,  # Needed by newer chat models
-            output_key="output" 
-        )
 
         #-------------------------------------------------------------------------------- 
         #------------------------------- CREATE TOOLS: ----------------------------------
         #-------------------------------------------------------------------------------- 
-        SERPER_API_KEY = os.getenv("SERPER_API_KEY")  # Get the API key
-        if "serper_api_key" not in st.session_state:
-            load_dotenv()
-            st.session_state.serper_api_key = os.getenv("SERPER_API_KEY")
-            if not st.session_state.serper_api_key:
-                logging.error(f"{my_name()}: SERPER_API_KEY not found in .env file")
-                return None     # could be made more robust, but I will leave it for future
+        # define Tavily web search tool
+        load_dotenv()
+        api_key = os.getenv("TAVILY_API_KEY")
+        if not api_key:
+            logging.error(f"{my_name()}: TAVILY_API_KEY not found in .env file")
+            return None 
+
+        web_search_tool = TavilySearchResults(
+            max_results=5,  # Limit results
+            search_depth="advanced",  # More comprehensive search
+            include_images=True  # Include image results
+        )
 
         # Define the local search tool: 
         local_search_tool = Tool(
@@ -245,28 +190,27 @@ def setup_rag_chain(llm_model: str, vector_store_path: str)-> AgentExecutor:
                     "Use the tool to enrich your answers with links and images"
             )
         
-        # Define the web search tool: 
-        web_search_tool = Tool(
-            name="web_search",  # Unique name for the tool
-            func=web_search,    # The function to execute when this tool is called
-            description="Search the web for general skincare information or questions "
-                        "that are not specific to Sephora products, or require real-time data."
-                        "Do NOT use the tool for searching for products other than Sephora."
-                        
-        )
         
         tools = [local_search_tool, web_search_tool]
 
         #--------------------------------------------------------------------------------
         #-------------------------------- CREATE THE AGENT ------------------------------
         #-------------------------------------------------------------------------------- 
-        agent = initialize_agent(
-            tools=tools,
-            llm=llm,
-            agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION,
-            verbose=True,
-            memory=memory
-        )
+
+        # memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True,  output_key="output")
+        # agent = initialize_agent(tools=tools, llm=llm, agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION, verbose=False,
+        #    memory=memory, agent_kwargs={"prompt": assistant_prompt})
+
+        # Create checkpointer with initial history
+        checkpointer = MemorySaver()
+        
+        agent = create_react_agent(
+            model = llm_model,   
+            tools = tools,   
+            checkpointer=checkpointer,
+            debug = False,                  # this is a replacement for Verbose
+            prompt = assistant_prompt
+            )
 
         logging.info(f"{my_name()}: Agent initialized.")
 
@@ -277,63 +221,126 @@ def setup_rag_chain(llm_model: str, vector_store_path: str)-> AgentExecutor:
     logging.info(f"{my_name()}: RAG chain initialized.")
     return agent
 
-#=========================================================================================
-#---------------------------------------- MAIN () ----------------------------------------
-#=========================================================================================
+#====================================================================================
+#---------------------- HELPER: PARSE_AGENT_RESPONSE() ------------------------------
+#====================================================================================
+def parse_agent_response(response: Dict[str, Any]) -> str:
+    """
+    Parses the raw response from the agent, collecting all text from AI messages.
+    Args:
+        response (dict): The raw response containing a list of messages.
+    Returns:
+        str: A concatenated string of all text content from AI messages.
+    """
+    # Validate the response structure
+    if not isinstance(response, dict) or 'messages' not in response or not isinstance(response['messages'], list):
+        logging.error(f"{my_name()}: Unexpected response structure: {response}")
+        return "Error: Received an unexpected response from the agent."
+
+    try:
+        # Strategy 1: Direct output key
+        if isinstance(response, dict) and 'output' in response:
+            return str(response['output'])
+        
+        # Strategy 2: Last AI Message
+        if isinstance(response, dict) and 'messages' in response:
+            ai_messages = [
+                msg for msg in response['messages'] 
+                if isinstance(msg, AIMessage)
+            ]
+            
+            if ai_messages:
+                return ai_messages[-1].content
+        
+        # Strategy 3: Fallback to string representation
+        return str(response)
+    
+    except Exception as e:
+        logging.error(f"{my_name()}: Error extracting response: {e}")
+        return f"{my_name()}: Error extracting response: {e}"
+ 
+ 
+#====================================================================================
+#----------------------------------- MAIN() -----------------------------------------
+#====================================================================================
 def main(llm_model: str, vector_store_path: str) -> None:
     """
     Main function to run the Streamlit app for the Sephora chatbot.
     Args:
         llm_model (str): LLM provider name.
+        vector_store_path (str): Path to the FAISS vector store.
     """
+    # Short alias for session state
     ss = st.session_state
     start_time = time.time()
-    logging.info(f"{my_name()}: Starting! ")
-     
+    logging.info("Starting!")
+
+    # Initialize the agent with a spinner
     with st.spinner("Please allow me about ten seconds to get ready"):
-        # Assume the vector store is created on disk.
-        # We store it in session state to avoid re-loading on every interaction.
-        if "agent" not in ss: 
+        if "agent" not in ss:
             ss.agent = setup_rag_chain(llm_model=llm_model, vector_store_path=vector_store_path)
             if ss.agent is None:
                 st.error("Error initializing RAG chain. Exiting.")
-                return      
-            logging.info(f"{my_name()}: RAG chain initialized!")
-    
+                return
+            logging.info("RAG chain initialized!")
+
     st.write("I am ready for your questions!")
 
-    # Initialize or retrieve chat history from session state
-    if "messages" not in st.session_state:
-        logging.info(f"{my_name()}: Initializing chat history.")
-        st.session_state.messages = []
+    # Initialize chat history if not present
+    if "messages" not in ss:
+        logging.info("Initializing chat history.")
+        ss.messages = []
 
-    # Display the chat history
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    # Container for chat history (non-scrollable, grows with content)
+    chat_container = st.container()
+
+    # Display chat history
+    with chat_container:
+        for message in ss.messages:
+            with st.chat_message(message["role"], avatar=None):
+                st.markdown(message["content"])
 
     # Get user input
     user_input = st.chat_input("Please ask me...")
-    logging.info(f"User question: {user_input}")
+    logging.info(f"{my_name()}: User question: {user_input}")
 
-    with st.spinner("Thinking about it..."):
-        if user_input:
-            # Append the user's message to history
-            ss.messages.append({"role": "user", "content": user_input})
+    if user_input:
+        # Append and display user message immediately
+        ss.messages.append({"role": "user", "content": user_input})
+        with chat_container:
+            with st.chat_message("user", avatar=None):
+                st.markdown(user_input)
+
+        # Process agent response with spinner
+        with st.spinner("Thinking..."):
             try:
-                response = ss.agent.invoke({"input": user_input})
-                # logging.info(f"\n bot raw response: {response}")
-                bot_answer = response["output"]
-                # logging.info(f"\n metadata = {[r.metadata for r in response["source_documents"]]}")
-                logging.info(f"\n bot answer: {bot_answer}")
+                response = ss.agent.invoke(
+                    {"messages": [{"role": "user", "content": user_input}]},
+                    config={"configurable": {"thread_id": "sephora_chat"}}
+                )
+                logging.info(f"{my_name()}: raw response: {response}")
+                # Parse the response
+                bot_answer = parse_agent_response(response)
+                logging.info(f"{my_name()}: Bot answer: {bot_answer}")
             except Exception as e:
-                bot_answer = "Sorry, an error occurred while processing your request."
-                logging.error(f"\n Exception: {type(e).__name__} - {str(e)}")
-                st.error(str(e))
-            st.session_state.messages.append({"role": "assistant", "content": bot_answer})
-            logging.info(f"time passed: {time.time() - start_time}")
-            # Rerun the app to update the conversation
-            st.rerun()
+                error_msg = f"An error occurred: {type(e).__name__} - {str(e)}"
+                logging.error(error_msg)
+                bot_answer = error_msg
+
+        # Append assistant response to chat history
+        ss.messages.append({"role": "assistant", "content": bot_answer})
+
+        # Display assistant response with default character-by-character typing effect
+        with chat_container:
+            with st.chat_message("assistant", avatar=None):
+                placeholder = st.empty()
+                displayed_text = ""
+                for char in bot_answer:
+                    displayed_text += char
+                    placeholder.markdown(displayed_text)
+                    time.sleep(0.01)  # Adjust typing speed as needed
+
+    logging.info(f"{my_name()}: Time passed: {time.time() - start_time}")
 
 if __name__ == "__main__":
     main(llm_model=LLM_MODEL, vector_store_path= VECTOR_STORE_PATH )

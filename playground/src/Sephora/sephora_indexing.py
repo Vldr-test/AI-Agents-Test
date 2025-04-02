@@ -22,7 +22,7 @@ JSONL_FILE: str = r"C:\Users\Vladi_Ruppo\Downloads\skincare_parsed.jsonl"
 VECTOR_STORE_PATH: str = r"C:\Users\Vladi_Ruppo\Downloads\faiss_index"
 
 CHUNK_SIZE = 1500
-CHUNK_OVERLAP = 100
+CHUNK_OVERLAP = 100 
 
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
