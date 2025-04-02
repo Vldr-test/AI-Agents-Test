@@ -1,0 +1,47 @@
+# Python-specific
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Environment variables and secrets
+.env
+.env.local
+*.env
+../.env
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Dependency management (CrewAI uses Poetry)
+poetry.lock
+.pdm.toml
+__pypackages__/
+
+# OS-specific files
+.DS_Store  # macOS
+Thumbs.db  # Windows
+
+# Editor/IDE files
+*.swp
+*.swo
+.vscode/
+.idea/
+*.sublime-workspace
+
+# CrewAI-specific outputs (adjust as needed)
+report.md
+*.log
+
+# Miscellaneous
+*.bak
+*.tmp
+*.cache
