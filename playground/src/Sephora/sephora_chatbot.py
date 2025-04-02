@@ -361,4 +361,4 @@ def main(llm_model: str, vector_store_path: str) -> None:
     logging.info(f"{my_name()}: Time passed: {time.time() - start_time}")
 
 if __name__ == "__main__":
-    main(llm_model=LLM_MODEL, vector_store_path= VECTOR_STORE_PATH )
+    main(llm_model=LLM_MODEL, vector_store_path= os.path.join(os.getcwd(), VECTOR_STORE_PATH))
