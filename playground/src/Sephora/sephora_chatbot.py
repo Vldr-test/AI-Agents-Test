@@ -50,6 +50,10 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
 # Lambda to get current function name for logging
 my_name = lambda: inspect.currentframe().f_back.f_code.co_name
 
+def is_in_cloud():
+    # Check for the ST_SECRETS variable to determine if running in Cloud
+    return "ST_SECRETS" in st.secrets
+
 #=========================================================================================
 #--------------------------------------- PROMPTS -----------------------------------------
 #=========================================================================================
@@ -361,4 +365,9 @@ def main(llm_model: str, vector_store_path: str) -> None:
     logging.info(f"{my_name()}: Time passed: {time.time() - start_time}")
 
 if __name__ == "__main__":
-    main(llm_model=LLM_MODEL, vector_store_path= os.path.join(os.getcwd(), VECTOR_STORE_PATH))
+    # Get the absolute path of the directory containing this script
+    working_dir = os.path.dirname(os.path.abspath(__file__))
+    logging.info(f"Working directory: {working_dir}")
+    vector_store_path = os.path.join(working_dir, VECTOR_STORE_PATH)
+    logging.info(f"Vector store path: {vector_store_path}")
+    main(llm_model=LLM_MODEL, vector_store_path= vector_store_path  )
