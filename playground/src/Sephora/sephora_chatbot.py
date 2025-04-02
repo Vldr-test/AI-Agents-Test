@@ -1,6 +1,5 @@
 # sephora_chatbot.py
 
-
 import logging
 from typing import List, Dict, Optional, Union, Tuple, Any
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -8,11 +7,9 @@ from langchain_community.vectorstores import FAISS
 from langchain.chat_models import init_chat_model
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-
  
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_community.tools import TavilySearchResults
-
 
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.prebuilt import create_react_agent
