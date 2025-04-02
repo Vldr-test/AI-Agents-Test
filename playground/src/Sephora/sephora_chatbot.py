@@ -146,7 +146,7 @@ def setup_rag_chain(llm_model: str, vector_store_path: str)-> AgentExecutor:
     #-------------------------------------------------------------------------------- 
     #----------------------- CONNECT TO THE VECTOR STORE: ---------------------------
     #-------------------------------------------------------------------------------- 
-    
+     
     def explore_env():
         path_to_check = VECTOR_STORE_PATH:
         parent_dir = os.path.dirname(path_to_check) if path_to_check != "" else "."
