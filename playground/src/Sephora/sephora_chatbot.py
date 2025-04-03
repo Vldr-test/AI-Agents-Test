@@ -1,5 +1,5 @@
 # sephora_chatbot.py
-
+ 
 import logging
 from typing import List, Dict, Optional, Union, Tuple, Any
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -37,9 +37,7 @@ JSONL_FILE: str = r"C:\Users\Vladi_Ruppo\Downloads\skincare_parsed.jsonl"
 # VECTOR_STORE_PATH: str = r"C:\Users\Vladi_Ruppo\Downloads\faiss_index"
 VECTOR_STORE_PATH = "faiss_index"
 
-RAG_RESULTS = 7
-
-CHAIN_TYPE = "CHATBOT"    # "STATELESS" or "CHATBOT"
+RAG_RESULTS = 5
 
 LLM_MODEL = "anthropic:claude-3-5-sonnet-latest"
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
@@ -50,56 +48,63 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
 # Lambda to get current function name for logging
 my_name = lambda: inspect.currentframe().f_back.f_code.co_name
 
-def is_in_cloud():
-    # Check for the ST_SECRETS variable to determine if running in Cloud
-    return "ST_SECRETS" in st.secrets
 
 #=========================================================================================
 #--------------------------------------- PROMPTS -----------------------------------------
 #=========================================================================================
 # Create a chat prompt template for system message 
+
+greeting = str("Hi! I'm Amina, your Sephora beauty advisor. " 
+        "I'm here to help you with any questions about skincare, makeup, or beauty products available at Sephora. " 
+        "How can I assist you today?")
+
 assistant_prompt = """
-    You are a helpful and friendly AI Product assistant that answers generic questions about 
-    healthcare products, focusing on and prioritizing Sephora products 
-    You work for Sephora, providing concise, clear, and relevant information to its potential customers. 
-    Your name is Marfusha  - a healthcare assistant from Sephora identifying as female
-    
-    - Always speak in a professional, helpful tone.
-    
-    - Only answer based on the provided context — never make up details. 
-      If unsure, say: 'I'm sorry, I'm not sure.'
-    
-    - Find most relevant information about specific Sephora products using the internal search tool. 
-    
-    - NEVER tell or imply that the current year is "2024" - it is wrong! 
-      Always use your Web search tool to check the current date! 
-    
-    - If the user asks  a generic question about modern trends, latest products, 
-      new offerings and discoveries, etc., ALWAYS use your Web search tool.   
+You are **Amina**, a helpful, friendly, and professional AI assistant for **Sephora** customers.  
+You specialize in providing concise, accurate, and relevant information about Sephora products, beauty trends, and personalized recommendations.
+---
+Behavior Guidelines:
+
+- Always respond in a **professional, warm, and helpful tone**.
+- If you're **unsure** of an answer, say so — NEVER make up details.
+- If the **user's question is unclear**, ask for clarification before answering.
+- **Never promote competitor products**.
+- If appropriate, introduce Sephora products and suggestions **without overselling**.
+- When you mention a Sephora product, ALWAYS **show product's image and / or link to this product** from [internal_search] tool.
+- Aim to **understand the customer's needs** — ask clarifying questions (e.g. skin type, preferences, budget, occasion) when helpful.
+---
+
+Tool Usage:
+
+- Use the `[internal_search]` tool to retrieve product details from Sephora’s internal catalog.
+- Use the `[web_search]` tool when:
+  - The user asks about **trends, new launches, modern beauty topics**, or
+  - The internal search does **not return results**.
+- If you use `[web_search]` data, always state that **this information is from the web** and mention the **country** the result is from.
+- Never refer to the tools by name when speaking to the user (e.g., don’t mention Tavily or "search tool").
+---
+
+ Response Format:
+
+- Be **brief and to the point**.
+- Include **all relevant information** in your final response, even if it came up earlier in the conversation.
+   + After using any tool, ALWAYS generate a final, complete response for the user. 
+   + Do not wait for further instructions — conclude the thought clearly, even for open-ended or trend-related questions.
+- Use:
+  - Bullet points for features, benefits, or comparisons.
+  - **Bold** to emphasize product names.
   
-    - Use your Web search tool, when the user asks about Sephora's product, 
-        but there is not enough info from the internal search tool. 
-        If you are using information from the Web search tool, 
-        ALWAYS mention that this information is from the Web - and ALWAYS mention the country(ies)) 
-        your gathered it from! No need to mention Tavily explicitely 
-   
-    - Answer general question without overselling Sephora's products. Do not oversell / push, but 
-      you might find subtle and gentle ways to offer Sephora products naturally. 
+  - When you mention a Sephora product, show it's images and / or links to this product from [internal_search_tool]
+  - Markdown format for product images and links:
+    - Product image: `![Product Image](https://www.sephora.com/productimages/abc.jpg)`
+    - Product link: `[View on Sephora](https://www.sephora.com/product/{{product_id}})`
+---
+Temporal Accuracy:
 
-    - Never promote competition's products.  
-    
-    - Keep your responses brief and to the point.
+- NEVER say or imply that the current year is "2024" — it is wrong!
+- Use the `[web_search]` tool to verify the current date when needed.
 
-    
-    Format:
-    - Always include all relevant information in your final response, even if it was mentioned earlier in the conversation.
-    - Use emojis to add warmth where appropriate.
-    - Use bullet points for clarity.
-    - Use MARKUP to emphasize important text in your reply, such as product names
-    - Whenever relevant, include image links or product URLs in markdown format:
-       - Example image: ![Product Image](https://www.sephora.com/productimages/abc.jpg)
-       - Example link: [View on Sephora](https://www.sephora.com/product/{{product_id}})
-    """
+"""
+
  
 #=========================================================================================
 #--------------------------------------- LOCAL_SEARCH() ----------------------------------
@@ -113,6 +118,7 @@ def local_search(query: str, retriever)->str:
         str: A string containing relevant product information retrieved from the database, 
              with each document separated by a newline.
     """
+    start_time = time.time()
     logging.info(f"{my_name()} starting")
 
     # Retrieve relevant documents from the FAISS vector store using its retriever
@@ -122,7 +128,7 @@ def local_search(query: str, retriever)->str:
     # Each document's content is separated by a newline for readability
     if docs:
         result = "\n".join([doc.page_content for doc in docs])
-        logging.info(f"{my_name()} returning results")
+        logging.info(f"{my_name()} returning results. response time: {time.time() - start_time}")
         return result
     else:
         logging.error(f"{my_name()}, no results found")
@@ -203,8 +209,7 @@ def setup_rag_chain(llm_model: str, vector_store_path: str)-> AgentExecutor:
             name="local_database_search",  # Unique name for the tool
             func= lambda query: local_search(query, retriever),   # The function to execute when this tool is called
             description="Search Sephora's skincare product database for specific product information, "
-                    "such as ingredients, images, links to products, etc.This is your PRIMARY source of information."
-                    "Please use the tool to improve your answers with Sephora - specific information. " 
+                    "such as ingredients, images, links to products, etc."
                     "Use the tool to enrich your answers with links and images"
             )
         
@@ -302,12 +307,12 @@ def main(llm_model: str, vector_store_path: str) -> None:
                 return
             logging.info("RAG chain initialized!")
 
-    st.write("I am ready for your questions!")
 
     # Initialize chat history if not present
     if "messages" not in ss:
         logging.info("Initializing chat history.")
         ss.messages = []
+        ss.messages.append({"role": "assistant", "content": greeting})
 
     # Container for chat history (non-scrollable, grows with content)
     chat_container = st.container()
@@ -315,7 +320,7 @@ def main(llm_model: str, vector_store_path: str) -> None:
     # Display chat history
     with chat_container:
         for message in ss.messages:
-            with st.chat_message(message["role"], avatar=None):
+            with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
     # Get user input
@@ -326,8 +331,10 @@ def main(llm_model: str, vector_store_path: str) -> None:
         # Append and display user message immediately
         ss.messages.append({"role": "user", "content": user_input})
         with chat_container:
-            with st.chat_message("user", avatar=None):
+            with st.chat_message("user"):
                 st.markdown(user_input)
+    
+        start_time = time.time()
 
         # Process agent response with spinner
         with st.spinner("Thinking..."):
@@ -336,7 +343,7 @@ def main(llm_model: str, vector_store_path: str) -> None:
                     {"messages": [{"role": "user", "content": user_input}]},
                     config={"configurable": {"thread_id": "sephora_chat"}}
                 )
-                logging.info(f"{my_name()}: raw response: {response}")
+                # logging.info(f"{my_name()}: raw response: {response}")
                 # Parse the response
                 bot_answer = parse_agent_response(response)
                 logging.info(f"{my_name()}: Bot answer: {bot_answer}")
@@ -349,16 +356,32 @@ def main(llm_model: str, vector_store_path: str) -> None:
         ss.messages.append({"role": "assistant", "content": bot_answer})
 
         # Display assistant response with default character-by-character typing effect
+        # with chat_container:
+        #    with st.chat_message("assistant"):
+        #        placeholder = st.empty()
+        #        displayed_text = ""
+        #        for char in bot_answer:
+        #            displayed_text += char
+        #            placeholder.markdown(displayed_text)
+        #            time.sleep(0.01)  # Adjust typing speed as needed
+
+        # Display assistant response with word-by-word typing effect, preserving Markdown
         with chat_container:
-            with st.chat_message("assistant", avatar=None):
+            with st.chat_message("assistant"):
                 placeholder = st.empty()
                 displayed_text = ""
-                for char in bot_answer:
-                    displayed_text += char
+                lines = bot_answer.split("\n")  # Split into lines first
+                for line in lines:
+                    words = line.split()  # Split each line into words
+                    for word in words:
+                        displayed_text += word + " "  # Add word and a space
+                        placeholder.markdown(displayed_text)
+                        time.sleep(0.05)  # Adjust typing speed as needed
+                    displayed_text += "\n"  # Add newline after each line
                     placeholder.markdown(displayed_text)
-                    time.sleep(0.01)  # Adjust typing speed as needed
 
-    logging.info(f"{my_name()}: Time passed: {time.time() - start_time}")
+
+    logging.info(f"{my_name()}: Total time for response: {time.time() - start_time}")
 
 if __name__ == "__main__":
     # Get the absolute path of the directory containing this script
