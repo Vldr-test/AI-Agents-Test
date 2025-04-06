@@ -37,26 +37,117 @@ QUERY_TYPES = {
     "REAL_TIME_DATA_QUERY": ["accuracy", "factual_correctness"],
     "OTHER": ["quality"]
 }
+ 
+from langchain_community.utilities import WikipediaAPIWrapper, SerpAPIWrapper, OpenWeatherMapAPIWrapper 
+from langchain_community.tools.tavily_search import TavilySearchResults
+from langchain_community.tools import DuckDuckGoSearchRun, WikipediaQueryRun, OpenWeatherMapQueryRun
+from langchain_experimental.tools import PythonREPLTool #, YoutubeVideoSearchTool
+from langchain_community.agent_toolkits import FileManagementToolkit  
+from langchain_core.tools import Tool, BaseTool
+
+import os  
+
+#=======================================================================================
+#------------------------------ TOOLS CONFIGURATION ------------------------------------
+#=======================================================================================
+
+#def serp_api_factory(api_key: str) -> Tool:
+#    """A wrapper for the SerpAPI search engine. Required since SerpAPIWrapper does not have 
+#       'description' field, etc.
+#  """
+#    tool = SerpAPIWrapper(serpapi_api_key = api_key)
+#    return Tool(name="SerperAPI search tool", 
+#                func=tool.run, 
+#                description="Search the internet for current information"
+#        )
+
+class HITL_tool(BaseTool):
+    name: str = "HITL_tool" # Give it a clear name
+    description: str = ( # Crucial for the LLM to know when to use it
+        "Use this tool when you need clarification, confirmation, or additional input "
+        "directly from the human user. Ask a clear question for the human based on your current task. "
+    )
+
+    # Synchronous version
+    def _run(self, query: str) -> str:
+        """Synchronously ask the human for input."""
+        print(f"\n Agent asks: {query}") # Display the question from the LLM
+        user_response = input("Your Input: ")    # Get input from console
+        return user_response
 
 
-AVAILABLE_TOOLS = {
-        "YoutubeVideoSearchTool":  { 
-            "tool_description":"A RAG tool aimed at searching within YouTube videos, ideal for video data extraction.",
-            "tool_factory": None # YoutubeVideoSearchTool
-            }, 
-        "SerperDevTool": { 
-            "tool_description":"Designed to search the internet and return the most relevant results.",
-            "tool_factory": None  # SerperDevTool
-            },
-#        "WebsiteSearchTool" : { 
-#            "tool_description": "Performs a RAG (Retrieval-Augmented Generation) search within the content of a website.",
-#           "tool_factory": None # WebsiteSearchTool
-#            },
-        "CodeInterpreterTool" : {
-            "tool_description": "A tool for interpreting and running Python code, ideal for programming tasks.",
-            "tool_factory": None # CodeInterpreterTool
-        }
+ALL_TOOLS = {
+   
+    #"YoutubeVideoSearchTool":  { 
+    # A RAG tool aimed at searching within YouTube videos, ideal for video data extraction.
+    #   "API_KEY": None, 
+    #   "tool_factory" : YoutubeVideoSearchTool
+    #}, 
+
+    "HITL_tool": {
+    # A tool for human-in-the-loop interaction, allowing the agent to ask the user for input.
+        "API_KEY": None, 
+        "tool_factory": lambda: HITL_tool()
+    }, 
+    
+
+    "WikipediaQueryRun" : {
+    # A tool for querying Wikipedia pages, useful for retrieving structured information.
+        "API_KEY": None,
+        "tool_factory": lambda: WikipediaQueryRun(api_wrapper=WikipediaAPIWrapper(top_k_results=1))
+        # Import: from langchain_community.tools import WikipediaQueryRun
+        #         from langchain_community.utilities import WikipediaAPIWrapper
+        },
+
+    # There is a complicated error this tool is causing; for the time being, Tavily is used instead.
+    #"SerperAPI": { 
+    # Designed to search the internet and return the most relevant results.
+    #    "API_KEY": "SERPER_API_KEY", 
+    #    "tool_factory": lambda api_key: serp_api_factory(api_key=api_key)
+    #    },
+    # Import: from langchain_community.utilities import SerpAPIWrapper
+    #        from langchain.tools import Tool
+
+    
+    "TavilySearchResults" : {
+    # A tool for searching and retrieving results from Tavily, a specialized search engine.
+        "API_KEY": "TAVILY_API_KEY", 
+        "tool_factory": lambda api_key: TavilySearchResults(tavily_api_key=api_key, max_results=5)
+        },
+    # Import: from langchain_community.tools.tavily_search import TavilySearchResults
+
+    "DuckDuckGoSearchRun" : {
+        "API_KEY": None, 
+        "tool_factory": lambda: DuckDuckGoSearchRun()
+        }, 
+    # Import: from langchain_community.tools import DuckDuckGoSearchRun
+
+    "PythonREPLTool" : {
+        # A tool for executing Python code in a REPL (Read-Eval-Print Loop) environment.
+        "API_KEY": None, 
+        "tool_factory": lambda: PythonREPLTool()
+    }, 
+    # Import: from langchain_community.tools import PythonREPLTool
+
+    "OpenWeatherMap": {
+        "API_KEY": "OPENWEATHERMAP_API_KEY",  # Requires an API key from openweathermap.org
+        "tool_factory": lambda api_key: OpenWeatherMapQueryRun(
+            api_wrapper=OpenWeatherMapAPIWrapper(openweathermap_api_key=api_key)
+        )
+        # Import: from langchain_community.tools import OpenWeatherMapQueryRun
+        #         from langchain_community.utilities import OpenWeatherMapAPIWrapper
     }
+
+    # These is not one tool, but a set of tools for file management. It is not instantiated propertly yet.
+    #"FileManagement": {
+    #    "API_KEY": None,
+    #    "tool_factory": lambda: FileManagementToolkit(
+    #        root_dir=os.getenv("AGENT_FILE_ROOT_DIR", "/tmp/agent_files") # Read from env
+    #    ).get_tools() # Decide below if you want all tools
+    #}
+    # Import: from langchain_community.agent_toolkits import FileManagementToolkit
+}
+
 
 QUERY_TYPES_TEMPERATURE = {
     "CREATIVE_WRITING": {
@@ -151,18 +242,19 @@ class SimpleResponseFormat(RootModel[dict[str, str]]):
 #-----------------------------------------------------------------------------------------------------------------------
 
 # response from query_analysis
-class QueryAnalysisFormat(BaseModel):
-  query_type: str
-  # criteria: List[str]
-  recommended_tools: Optional[List[str]] = None    
-  improved_query: Optional[str] = None             # this is for future when we will change both query and temperature based on the query_type 
+class QueryAnalysisResponseFormat(BaseModel):
+    query_type: str                         # type of query; e.g. "SOFTWARE_PROGRAMMING", "CREATIVE_WRITING", etc.
+    query_class: str                        # "COMPLEX" or "SIMPLE"
+    prompt_for_agents: str                  # improved prompt that includes tools, etc. 
+    recommended_tools: Optional[List[str]] = None     # names of tools to be used by agents 
 
+  
 #--------------------------------------------------------------------------------------------------------------------------
 
 # internal class
 class InnerPeerReviewFormat(BaseModel):
-  improvement_points: List[str]
-  score: int 
+    improvement_points: List[str]
+    score: int 
 
 
 class PeerReviewResponseFormat(RootModel[dict[str, InnerPeerReviewFormat]]):

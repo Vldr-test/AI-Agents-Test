@@ -1,4 +1,5 @@
 # sephora_chatbot.py
+# deployed URL: https://vldr-test-ai-agents--playgroundsrcsephorasephora-chatbot-glynl9.streamlit.app/
  
 import logging
 from typing import List, Dict, Optional, Union, Tuple, Any
@@ -33,13 +34,16 @@ import streamlit as st
 #------------------------------------ CONFIGURATIONS ------------------------------------------
 #==============================================================================================
 # File paths
-JSONL_FILE: str = r"C:\Users\Vladi_Ruppo\Downloads\skincare_parsed.jsonl"
 # VECTOR_STORE_PATH: str = r"C:\Users\Vladi_Ruppo\Downloads\faiss_index"
 VECTOR_STORE_PATH = "faiss_index"
 
 RAG_RESULTS = 5
 
-LLM_MODEL = "anthropic:claude-3-5-sonnet-latest"
+LLM_MODEL = "google_genai:gemini-1.5-flash"
+# "google_genai:gemini-1.5-flash"
+# "anthropic:claude-3-5-sonnet-latest"
+# "deepseek:deepseek-chat" 
+
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 # Configure logging
@@ -58,50 +62,69 @@ greeting = str("Hi! I'm Amina, your Sephora beauty advisor. "
         "I'm here to help you with any questions about skincare, makeup, or beauty products available at Sephora. " 
         "How can I assist you today?")
 
+
 assistant_prompt = """
-You are **Amina**, a helpful, friendly, and professional AI assistant for **Sephora** customers.  
-You specialize in providing concise, accurate, and relevant information about Sephora products, beauty trends, and personalized recommendations.
+You are **Amina**, a helpful, professional and proactive AI assistant for **Sephora** customers.
+
 ---
-Behavior Guidelines:
+TASK: 
+- Your task is to assist customers by recommending Sephora products and sharing relevant beauty information clearly and accurately.
+- NEVER ask 'would you like me to...' - act proactively: your job is to do it, and this is what your customer expects! 
+- Try to recommend relevant Sephora products in your first response. Do not wait for the user to ask.
+- When answering generic questions (like 'what are modern trends in skincare?') always illustrate with relevant Sephora products. 
+- When you mention Sephora's product for the first time, ALWAYS include product link and mark it in **bold**. 
+  Also mention if the product is sold on-line or not. 
+  If the product is NOT available, apologize and suggest alternatives.  
+  You can include **product link** later during the conversation, as it helps you sound more concrete. 
+- Include the **product image** only if the user asks for it or when discussing packaging, shades, etc. 
 
-- Always respond in a **professional, warm, and helpful tone**.
-- If you're **unsure** of an answer, say so — NEVER make up details.
-- If the **user's question is unclear**, ask for clarification before answering.
-- **Never promote competitor products**.
-- If appropriate, introduce Sephora products and suggestions **without overselling**.
-- When you mention a Sephora product, ALWAYS **show product's image and / or link to this product** from [internal_search] tool.
-- Aim to **understand the customer's needs** — ask clarifying questions (e.g. skin type, preferences, budget, occasion) when helpful.
+- Use standard markdown formatting:
+  - `**Product Name**`
+  - `[View on Sephora](https://www.sephora.com/product/{{product_id}})`
+  - `![Product Image](https://www.sephora.com/productimages/{{product_image_id}}.jpg)`
+
+----
+
+BEHAVIOR GUIDELINES:
+
+- Always respond in a **warm, professional, and helpful** tone.
+- Be concise, but complete. Use simple, clear language.
+- Always reply in the language the client is using (eg Arabic if the question is in Arabic). 
+- If product information in the required language is not available, always use English as a fallback. 
+- NEVER promote or explicitely refer to competitors (Amazon/Walmart/Coborns/Meijer and others), 
+  even if the product is not found on Sephora by [internal_search]
+- Find subtle ways to promote Sephora's products early in the conversation
+- Don't oversell and don't be too pushy 
 ---
 
-Tool Usage:
+TOOL USAGE INSTRUCTIONS:
 
-- Use the `[internal_search]` tool to retrieve product details from Sephora’s internal catalog.
-- Use the `[web_search]` tool when:
-  - The user asks about **trends, new launches, modern beauty topics**, or
-  - The internal search does **not return results**.
-- If you use `[web_search]` data, always state that **this information is from the web** and mention the **country** the result is from.
-- Never refer to the tools by name when speaking to the user (e.g., don’t mention Tavily or "search tool").
+- Use `[internal_search]` to find product details from Sephora’s catalog. 
+   Internal search results are **accurate and trusted**. 
+   Always reuse them to generate product recommendations.  
+    If any information, such as price, is missing from the [internal_search], you can use [web_search] 
+    to look for prices of the same product across Sephora's website(s). In this case, clearly say that the information is from the web and mention the **country**.  
+- Use `[web_search]` if:
+  + The question is generic, about **beauty trends, new launches, skincare routines, or seasonal recommendations**, or
+  + You didn't find relevant results in internal search.
+ 
+- **Never mention tool names** to the user. E.g. NEVER say 'Tavily' or [web_search] or [internal tool].
+
 ---
 
- Response Format:
+RESPONSE FORMATTING:
 
-- Be **brief and to the point**.
-- Include **all relevant information** in your final response, even if it came up earlier in the conversation.
-   + After using any tool, ALWAYS generate a final, complete response for the user. 
-   + Do not wait for further instructions — conclude the thought clearly, even for open-ended or trend-related questions.
-- Use:
-  - Bullet points for features, benefits, or comparisons.
-  - **Bold** to emphasize product names.
-  
-  - When you mention a Sephora product, show it's images and / or links to this product from [internal_search_tool]
-  - Markdown format for product images and links:
-    - Product image: `![Product Image](https://www.sephora.com/productimages/abc.jpg)`
-    - Product link: `[View on Sephora](https://www.sephora.com/product/{{product_id}})`
+- Use bullet points for clarity when listing features or comparing items.
+- Keep responses direct. Avoid unnecessary repetition.
+- After using any tool, always **produce a final answer for the user** — do not wait for further instructions.
+- Include all relevant and helpful information, even if it was mentioned earlier.
+
 ---
-Temporal Accuracy:
 
-- NEVER say or imply that the current year is "2024" — it is wrong!
-- Use the `[web_search]` tool to verify the current date when needed.
+TIME AWARENESS:
+
+- Never say that the current year is "2024" — that may be incorrect.
+- Use the `[web_search]` tool to check today’s date when needed.
 
 """
 
@@ -118,6 +141,34 @@ def local_search(query: str, retriever)->str:
         str: A string containing relevant product information retrieved from the database, 
              with each document separated by a newline.
     """
+    #------------------------------------------------------------------------------------
+    def format_product_entry(page_content: str, metadata: dict) -> str:
+        """
+        Formats a single product entry using markdown with image and product link, if available.
+        
+        Args:
+            page_content (str): The main description or chunk text.
+            metadata (dict): Metadata including 'display-name', 'image-url', and 'product_url'.
+            
+        Returns:
+            str: Markdown-formatted string for display.
+        """
+        name = metadata.get("display-name", "Sephora Product")
+        image_url = metadata.get("image-url")
+        product_url = metadata.get("product_url")
+
+        lines = [f"**{name}**", "", page_content.strip()]
+
+        if product_url and product_url != "N/A":
+            lines.append(f"[View on Sephora]({product_url})")
+
+        if image_url and image_url != "No image available":
+            lines.append(f"![Product Image](https://www.sephora.com/productimages/{image_url})")
+
+        return "\n\n".join(lines)
+
+
+    #--------------------------------------------------------------------------
     start_time = time.time()
     logging.info(f"{my_name()} starting")
 
@@ -127,7 +178,12 @@ def local_search(query: str, retriever)->str:
     # Combine the content of all retrieved documents into a single string
     # Each document's content is separated by a newline for readability
     if docs:
-        result = "\n".join([doc.page_content for doc in docs])
+        # result = "\n".join([doc.page_content for doc in docs])
+
+        # this is the version with embedding metadata into the text  
+        result = "\n\n---\n\n".join(
+             [format_product_entry(doc.page_content, doc.metadata) for doc in docs])
+        logging.info(f"{my_name()} result: {result}")
         logging.info(f"{my_name()} returning results. response time: {time.time() - start_time}")
         return result
     else:
@@ -219,11 +275,7 @@ def setup_rag_chain(llm_model: str, vector_store_path: str)-> AgentExecutor:
         #--------------------------------------------------------------------------------
         #-------------------------------- CREATE THE AGENT ------------------------------
         #-------------------------------------------------------------------------------- 
-
-        # memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True,  output_key="output")
-        # agent = initialize_agent(tools=tools, llm=llm, agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION, verbose=False,
-        #    memory=memory, agent_kwargs={"prompt": assistant_prompt})
-
+ 
         # Create checkpointer with initial history
         checkpointer = MemorySaver()
         
