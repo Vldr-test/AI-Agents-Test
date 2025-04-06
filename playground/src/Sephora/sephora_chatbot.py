@@ -227,19 +227,31 @@ def setup_rag_chain(llm_model: str, vector_store_path: str)-> AgentExecutor:
             st.write(f"The parent directory '{parent_dir}' also does not exist.")
     #--------------------------------------------------------------------------------
 
+    #----------------------- LOAD THE EMBEDDINGS: ----------------------------------
+    # Set environment variable for offline mode
+    os.environ["HF_HUB_OFFLINE"] = "1"  # Enable offline mode for Hugging Face
+
+    # Define the path to the pre-cached model
+    model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "all-MiniLM-L6-v2")
+
+    # Load embeddings with the local model path
     if os.path.exists(vector_store_path):
         try:
-            embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+            # embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+            embeddings = HuggingFaceEmbeddings(
+            model_name=model_path,  # Use the local path instead of the model name
+            model_kwargs={"local_files_only": True}  # Force local file usage
+            )   
             vector_store = FAISS.load_local(vector_store_path, embeddings=embeddings, allow_dangerous_deserialization=True)
             retriever = vector_store.as_retriever()
             logging.info(f"\n Vector store loaded in {time.time() - start_time} seconds.")
         except Exception as e:
             logging.error(f"{my_name()}: Error loading vector store: {e}")
-            explore_env(vector_store_path)
+            # explore_env(vector_store_path)
             return None
     else:
         logging.error(f"{my_name()} Vector store not found. Please create the vector store first.")
-        explore_env(vector_store_path)
+        # explore_env(vector_store_path)
         return None 
     
     try:
