@@ -272,6 +272,8 @@ def setup_rag_chain(llm_model: str, vector_store_path: str)-> AgentExecutor:
             include_images=True  # Include image results
         )
 
+        logging.info(f"{my_name()}: Web search tool initialized.")
+
         # Define the local search tool: 
         local_search_tool = Tool(
             name="local_database_search",  # Unique name for the tool
@@ -281,7 +283,7 @@ def setup_rag_chain(llm_model: str, vector_store_path: str)-> AgentExecutor:
                     "Use the tool to enrich your answers with links and images"
             )
         
-        
+        logging.info(f"{my_name()}: Local search tool initialized.")
         tools = [local_search_tool, web_search_tool]
 
         #--------------------------------------------------------------------------------
