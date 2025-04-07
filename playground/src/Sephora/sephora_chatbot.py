@@ -37,11 +37,11 @@ import streamlit as st
 # VECTOR_STORE_PATH: str = r"C:\Users\Vladi_Ruppo\Downloads\faiss_index"
 VECTOR_STORE_PATH = "faiss_index"
 
-RAG_RESULTS = 5
+RAG_RESULTS = 4  # Number of results to return from the vector store
 
-LLM_MODEL = "google_genai:gemini-1.5-flash"
-# "google_genai:gemini-1.5-flash"
-# "anthropic:claude-3-5-sonnet-latest"
+LLM_MODEL = "anthropic:claude-3-5-sonnet-latest"
+# "openai:gpt-4"
+# "google_genai:gemini-1.5-flash" 
 # "deepseek:deepseek-chat" 
 
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
@@ -68,8 +68,10 @@ You are **Amina**, a helpful, professional and proactive AI assistant for **Seph
 
 ---
 TASK: 
-- Your task is to assist customers by recommending Sephora products and sharing relevant beauty information clearly and accurately.
+- Your task is to assist customers by recommending Sephora products from the [internal_search] tool and sharing relevant beauty information clearly and accurately.
+- You MUST ALWAYS find updated information about Sephora’s products using [internal_search] tool.
 - NEVER ask 'would you like me to...' - act proactively: your job is to do it, and this is what your customer expects! 
+- NEVER rely on your own knowledge or external sources, alwasy use [internal_search] tool to find Sephora products.
 - Try to recommend relevant Sephora products in your first response. Do not wait for the user to ask.
 - When answering generic questions (like 'what are modern trends in skincare?') always illustrate with relevant Sephora products. 
 - When you mention Sephora's product for the first time, ALWAYS include product link and mark it in **bold**. 
@@ -77,6 +79,11 @@ TASK:
   If the product is NOT available, apologize and suggest alternatives.  
   You can include **product link** later during the conversation, as it helps you sound more concrete. 
 - Include the **product image** only if the user asks for it or when discussing packaging, shades, etc. 
+
+Example:
+User: "What’s best for dry skin?"
+Response: [internal_search("best Sephora products for dry skin")]
+Based on the search, I recommend **Tatcha The Dewy Skin Cream**...
 
 - Use standard markdown formatting:
   - `**Product Name**`
@@ -170,7 +177,7 @@ def local_search(query: str, retriever)->str:
 
     #--------------------------------------------------------------------------
     start_time = time.time()
-    logging.info(f"{my_name()} starting")
+    logging.info(f"{my_name()} tool starting for internal search")
 
     # Retrieve relevant documents from the FAISS vector store using its retriever
     docs = retriever.get_relevant_documents(query)
@@ -234,26 +241,30 @@ def setup_rag_chain(llm_model: str, vector_store_path: str)-> AgentExecutor:
     # Define the path to the pre-cached model
     model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "all-MiniLM-L6-v2")
 
-    # Load embeddings with the local model path
-    if os.path.exists(vector_store_path):
-        try:
-            # embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
-            embeddings = HuggingFaceEmbeddings(
-            model_name=model_path,  # Use the local path instead of the model name
-            model_kwargs={"local_files_only": True}  # Force local file usage
-            )   
-            vector_store = FAISS.load_local(vector_store_path, embeddings=embeddings, allow_dangerous_deserialization=True)
-            retriever = vector_store.as_retriever()
-            logging.info(f"\n Vector store loaded in {time.time() - start_time} seconds.")
-        except Exception as e:
-            logging.error(f"{my_name()}: Error loading vector store: {e}")
+    ss = st.session_state
+    if "vector_store" not in ss:
+        # Load embeddings with the local model path
+        if os.path.exists(vector_store_path):
+            try:
+                # embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+                embeddings = HuggingFaceEmbeddings(
+                model_name=model_path,  # Use the local path instead of the model name
+                model_kwargs={"local_files_only": True}  # Force local file usage
+                )   
+                ss.vector_store = FAISS.load_local(vector_store_path, embeddings=embeddings, allow_dangerous_deserialization=True)
+                # retriever = vector_store.as_retriever()
+            except Exception as e:
+                logging.error(f"{my_name()}: Error loading vector store: {e}")
+                # explore_env(vector_store_path)
+                return None
+        else:
+            logging.error(f"{my_name()} Vector store not found. Please create the vector store first.")
             # explore_env(vector_store_path)
-            return None
-    else:
-        logging.error(f"{my_name()} Vector store not found. Please create the vector store first.")
-        # explore_env(vector_store_path)
-        return None 
+            return None 
     
+    retriever = ss.vector_store.as_retriever(search_kwargs={"k": RAG_RESULTS})
+    logging.info(f"\n Vector store loaded in {time.time() - start_time} seconds.")
+
     try:
 
         #-------------------------------------------------------------------------------- 
@@ -365,7 +376,7 @@ def main(llm_model: str, vector_store_path: str) -> None:
     logging.info("Starting!")
 
     # Initialize the agent with a spinner
-    with st.spinner("Please allow me about ten seconds to get ready"):
+    with st.spinner("Please allow me some time to get ready"):
         if "agent" not in ss:
             ss.agent = setup_rag_chain(llm_model=llm_model, vector_store_path=vector_store_path)
             if ss.agent is None:
