@@ -62,116 +62,7 @@ QUERY_TYPES = {
             ]
     }
 }
- 
-from langchain_community.utilities import WikipediaAPIWrapper, SerpAPIWrapper, OpenWeatherMapAPIWrapper 
-from langchain_community.tools.tavily_search import TavilySearchResults
-from langchain_community.tools import DuckDuckGoSearchRun, WikipediaQueryRun, OpenWeatherMapQueryRun
-from langchain_experimental.tools import PythonREPLTool #, YoutubeVideoSearchTool
-from langchain_community.agent_toolkits import FileManagementToolkit  
-from langchain_core.tools import Tool, BaseTool
 
-import os  
-
-#=======================================================================================
-#------------------------------ TOOLS CONFIGURATION ------------------------------------
-#=======================================================================================
-
-#def serp_api_factory(api_key: str) -> Tool:
-#    """A wrapper for the SerpAPI search engine. Required since SerpAPIWrapper does not have 
-#       'description' field, etc.
-#  """
-#    tool = SerpAPIWrapper(serpapi_api_key = api_key)
-#    return Tool(name="SerperAPI search tool", 
-#                func=tool.run, 
-#                description="Search the internet for current information"
-#        )
-
-class HITL_tool(BaseTool):
-    name: str = "HITL_tool" # Give it a clear name
-    description: str = ( # Crucial for the LLM to know when to use it
-        "Use this tool when you need clarification, confirmation, or additional input "
-        "directly from the human user. Ask a clear question for the human based on your current task. "
-    )
-
-    # Synchronous version
-    def _run(self, query: str) -> str:
-        """Synchronously ask the human for input."""
-        print(f"\n Agent asks: {query}") # Display the question from the LLM
-        user_response = input("Your Input: ")    # Get input from console
-        return user_response
-
-
-ALL_TOOLS = {
-   
-    #"YoutubeVideoSearchTool":  { 
-    # A RAG tool aimed at searching within YouTube videos, ideal for video data extraction.
-    #   "API_KEY": None, 
-    #   "tool_factory" : YoutubeVideoSearchTool
-    #}, 
-
-    "HITL_tool": {
-    # A tool for human-in-the-loop interaction, allowing the agent to ask the user for input.
-        "API_KEY": None, 
-        "tool_factory": lambda: HITL_tool()
-    }, 
-    
-
-    "WikipediaQueryRun" : {
-    # A tool for querying Wikipedia pages, useful for retrieving structured information.
-        "API_KEY": None,
-        "tool_factory": lambda: WikipediaQueryRun(api_wrapper=WikipediaAPIWrapper(top_k_results=1))
-        # Import: from langchain_community.tools import WikipediaQueryRun
-        #         from langchain_community.utilities import WikipediaAPIWrapper
-        },
-
-    # There is a complicated error this tool is causing; for the time being, Tavily is used instead.
-    #"SerperAPI": { 
-    # Designed to search the internet and return the most relevant results.
-    #    "API_KEY": "SERPER_API_KEY", 
-    #    "tool_factory": lambda api_key: serp_api_factory(api_key=api_key)
-    #    },
-    # Import: from langchain_community.utilities import SerpAPIWrapper
-    #        from langchain.tools import Tool
-
-    
-    "TavilySearchResults" : {
-    # A tool for searching and retrieving results from Tavily, a specialized search engine.
-        "API_KEY": "TAVILY_API_KEY", 
-        "tool_factory": lambda api_key: TavilySearchResults(tavily_api_key=api_key, max_results=5)
-        },
-    # Import: from langchain_community.tools.tavily_search import TavilySearchResults
-
-    "DuckDuckGoSearchRun" : {
-        "API_KEY": None, 
-        "tool_factory": lambda: DuckDuckGoSearchRun()
-        }, 
-    # Import: from langchain_community.tools import DuckDuckGoSearchRun
-
-    "PythonREPLTool" : {
-        # A tool for executing Python code in a REPL (Read-Eval-Print Loop) environment.
-        "API_KEY": None, 
-        "tool_factory": lambda: PythonREPLTool()
-    }, 
-    # Import: from langchain_community.tools import PythonREPLTool
-
-    "OpenWeatherMap": {
-        "API_KEY": "OPENWEATHERMAP_API_KEY",  # Requires an API key from openweathermap.org
-        "tool_factory": lambda api_key: OpenWeatherMapQueryRun(
-            api_wrapper=OpenWeatherMapAPIWrapper(openweathermap_api_key=api_key)
-        )
-        # Import: from langchain_community.tools import OpenWeatherMapQueryRun
-        #         from langchain_community.utilities import OpenWeatherMapAPIWrapper
-    }
-
-    # These is not one tool, but a set of tools for file management. It is not instantiated propertly yet.
-    #"FileManagement": {
-    #    "API_KEY": None,
-    #    "tool_factory": lambda: FileManagementToolkit(
-    #        root_dir=os.getenv("AGENT_FILE_ROOT_DIR", "/tmp/agent_files") # Read from env
-    #    ).get_tools() # Decide below if you want all tools
-    #}
-    # Import: from langchain_community.agent_toolkits import FileManagementToolkit
-}
 
 
 QUERY_TYPES_TEMPERATURE = {
@@ -277,7 +168,7 @@ class QueryAnalysisResponseFormat_2(BaseModel):
     prompt_for_agents: str = Field(..., description="Prompt for agents")
     recommended_tools: Optional[List[str]] = Field(None, description="Names of tools to be used by agents")
 
-class IterationWinnerFormat(BaseModel): 
+class WinnerFormat(BaseModel): 
     name: str = Field(..., description="Name of the winner agent's llm")
     response: str = Field(..., description="Response of the winner")
     avg_score: int = Field(..., description="Winner's agent average score")

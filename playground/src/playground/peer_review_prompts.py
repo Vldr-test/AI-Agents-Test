@@ -1,6 +1,6 @@
 # peer_review_prompts
 
-from peer_review_config import QUERY_TYPES, my_name
+from peer_review_config import QUERY_TYPES, WinnerFormat, my_name
 import json
 import logging
 from pydantic import BaseModel
@@ -48,20 +48,23 @@ def get_query_analysis_prompt_1(tools_descriptions_str: str, query_types_str: st
     # Define the human message template string using an f-string.
     # Static context (tools_descriptions_str, query_types_str) is embedded directly.
     # '{input}' remains as the placeholder for the dynamic user query.
-    human_message_template_string = f"""Your task is to collect all relevant information from the user and external tools, 
-    , based on the user’s query ***{{input}}***.
+    human_message_template_string = f"""Your task is to collect all relevant information from the user 
+    and external tools, based on the user’s query ***{{input}}***.
     For that, you MUST execute the following steps:
     1. Classify the query into one and only one query_type from this list: ***{query_types_str}***.
     2. Define the query_class as 'SIMPLE' or 'COMPLEX', based on the anticipated response complexity.
-    3. CALL the internal 'HITL_tool' to get clarifications from the user. 
-    4. CALL one or several tools from this list: ***{tools_descriptions_str}*** to get additional context. 
-
+    3. CALL the internal 'HITL_tool' to get clarifications from the user - ONLY if required! 
+       Please check ALL information you need by engaging in a meaninful dialog, to avoid any ambiguity and possible misunderstandings. 
+       Do NOT call HITL_tool if eveything is already clear. 
+    4. CALL one or several tools from this list: ***{tools_descriptions_str}*** to get additional context (multiple times if required)
+    5. Prepare an improved version of the original query, incorporating user input from HITL_tool and relevant 
+    information from tools.
+    
     RETURN FORMAT:
     You MUST return a JSON object with exactly THREE fields, no extra text:
     * 'query_type' (a string): the query type from the list: ***{query_types_str}***.
     * 'query_class': 'COMPLEX' if you want to use the team of agents, or 'SIMPLE' if you want to do it yourself.
     * 'improved_query' (a string): an improved version of the original query, 
-    based on the user information from HITL_tool, as well as other tools' output.
 
     Always keep the language of the query (e.g a query in Spanish could be improved only in Spanish, if at all)
     Do NOT include any extra text, markers, or schema in your reply, — just the JSON.
@@ -107,7 +110,9 @@ def get_query_analysis_prompt_2(improved_query:str, tools_descriptions_str: str)
     You MUST return a JSON object with exactly TWO fields, no extra text:\n
     * 'prompt_for_agents' (a string): the prompt for the AI agents, based on the query.\n
     You can keep the original query if you believe it is a good prompt for the agents. \n 
-    * 'recommended_tools' (a list of strings): a list of recommended tools for the agents to execute.\n
+    * 'recommended_tools' (a list of strings): a list of recommended tools for the agents to use.\n
+    Make sure that the agents have all relevant tools, allowing them to answer the query better! 
+    E.g. if they have to search the Web, consider Tavily search tool, if they need to run Python code, consider Python_REPL, etc\n
 
     Always keep the language of the query (e.g a query in Spanish could be improved only in Spanish, if at all)
     Do NOT include any extra text, markers, or schema in your reply, — just the JSON.
@@ -233,7 +238,7 @@ def get_review_improvement_points_prompt(query: str, improvement_points: list[st
 #---------------------------------------------------------------------------
 #---------------------- GET_FEEDBACK_REQUEST_PROMPT() -------------------
 #---------------------------------------------------------------------------
-def get_feedback_request_prompt(winner_response: str, winner_score: int, improvement_points: list[str] )-> ChatPromptTemplate:
+def get_human_feedback_prompt(winner: WinnerFormat, tools_description: str)-> ChatPromptTemplate:
     
     # Define the system message content
     system_message_content = (
@@ -242,19 +247,23 @@ def get_feedback_request_prompt(winner_response: str, winner_score: int, improve
 
     # Define the human message template string using an f-string.
     human_message_template_string = f"""Your task is to check with the user if the user has any 
-     feedback on the final response . For that, you should:
-      - present the user the final winner response ***{winner_response}***, 
-      winner score ***{winner_score}*** and improvement points ***{improvement_points}***. 
-      - then, check for user's feedback, possibly engaging into a dialog. 
+     feedback on the final response. For that, you should:
+      - present the user the final winner response ***{winner.response}***, 
+      winner score ***{winner.avg_score}*** and suggested improvement points ***{winner.improvement_points}***. 
+      - then, check for user's feedback, possibly engaging into a dialog and clarifying additional inputs, if required. 
       Let the user know that if he or she types: "break", "stop", "enough" or similar, 
-      you will stop the interaction. 
+      you will stop the interaction. An "Enter" means that user has no feedback to provide  
+
+    TOOLS USAGE:
+    HITL_tool is the one to use with your interactions with the user. You have other tools at your disposal: 
+    ***{tools_description}***. Please use them judiciously, only if required.  
     
     RETURN FORMAT:
-    You MUST return a result of your dialog with the user, based on the HITL_tool input or a word "break" 
-    if the user decides to stop the work. 
+    You MUST return a string, summarizing your dialog with the user, based on the HITL_tool input - 
+    or a word "break" if the user decides to stop the work. 
 
     Do NOT include any extra text, markers, or schema in your reply, — just the user input.
-"""
+    """
 
     # Create the ChatPromptTemplate object
     prompt_template = ChatPromptTemplate.from_messages([

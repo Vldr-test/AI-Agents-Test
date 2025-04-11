@@ -55,9 +55,15 @@ def json_to_dict(text: str) -> Optional[Union[dict, list]]:
     text = text.strip()
 
     # Preprocess common LLM issues
-    # text = re.sub(r"(?<!\\)'", '"', text.replace("\\'", "'"))  # Single to double quotes
     text = re.sub(r',(\s*[}\]])', r'\1', text)  # Remove trailing commas
+    # text = re.sub(r"(?<!\\)'", '"', text.replace("\\'", "'"))  # Single to double quotes
     # text = text.replace('\\', '\\\\')  # Escape backslashes
+    # Preprocess common LLM issues
+    # text = text.replace('doesn"t', "doesn't").replace('can"t', "can't")
+    # text = re.sub(r'("(?:[^"\\]|\\.)*?)(\$|\*|\+)([^"]*")', r'\1\\\2\3', text)  # Escape $, *, +
+    # text = re.sub(r"(?<!\\)'", '"', text.replace("\\'", "'"))
+    # text = re.sub(r',(\s*[}\]])', r'\1', text)
+    # text = text.replace('\\', '\\\\')
 
     # Repair incomplete structures
     if text.startswith('{') and not text.endswith('}'):

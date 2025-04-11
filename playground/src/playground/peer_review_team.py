@@ -2,7 +2,7 @@
 
 from peer_review_config import (
     USE_REAL_THREADS, MAX_ITERATIONS, QUERY_TYPES, 
-    SimpleResponseFormat, PeerReviewResponseFormat, IterationWinnerFormat, 
+    SimpleResponseFormat, PeerReviewResponseFormat, WinnerFormat, 
     my_name
 )
 
@@ -60,7 +60,7 @@ class AgentTeam:
         """Initialize team with leader and agents."""
         self.agent_models: "List[BaseChatModel]" = []
         self.leader_model: "BaseChatModel" = None
-        self.state: "List[IterationWinnerFormat]" = [] #  stores info about each iteration's winner 
+        self.state: "List[WinnerFormat]" = [] #  stores info about each iteration's winner 
 
     #====================================================================
     #--------------------------- INITIALIZE() ---------------------------
@@ -296,11 +296,11 @@ class AgentTeam:
     #====================================================================
     def analize_peer_reviews(self, 
                         query: str,     # required to harmonize improvement points 
-                        peer_reviews: PeerReviewResponseFormat)->IterationWinnerFormat:
+                        peer_reviews: PeerReviewResponseFormat)-> WinnerFormat:
         """
             Accepts PeerReviewsRepsonseFormat object: {reviewing_agent: {'reviewed_agent': {improvement_points, score}}
             Calculates the averages and finds the winner. 
-            Returns: IterationWinnerFormat         
+            Returns: WinnerFormat         
         """
         logging.info(f"{my_name()} starting")
 
@@ -355,7 +355,7 @@ class AgentTeam:
             query = query, 
             improvement_points = improvement_points_table[winner_name])
         
-        return IterationWinnerFormat(
+        return WinnerFormat(
             avg_score = winner_avg_score, 
             response = "",          # will be filled in later 
             improvement_points = improvement_points, 
@@ -394,7 +394,7 @@ class AgentTeam:
                 query:str,          
                 tools: Optional[List[BaseTool]] = None,             # could be used in future
                 max_iterations: Optional[int] = MAX_ITERATIONS      # internal iterations 
-                ) -> List[IterationWinnerFormat]: 
+                ) -> List[WinnerFormat]: 
          
         iteration = 0
         winner = None 
@@ -445,7 +445,7 @@ if __name__ == "__main__":
     # leader = LeaderAgent("openai:gpt-4o-mini")
     team = AgentTeam()
     team.initialize(leader_llm_name = "openai:gpt-4o-mini", 
-                         agent_llm_names = ["google_genai:gemini-2.0-flash", "deepseek:deepseek-chat"])
+                         agent_llm_names = ["openai:gpt-4o-mini", "google_genai:gemini-2.0-flash", "deepseek:deepseek-chat"])
  
     prompt = query 
     recommended_tools = []
