@@ -12,32 +12,17 @@ from typing import Type, List, Dict, Optional, Tuple, Union, Any
 
 
 
-#===============================================================================================================================
-#-------------------------------------------------- PYDANTIC DATA MODELS -------------------------------------------------------
-#===============================================================================================================================
-
-class AgentResponseFormat(BaseModel):
-    agent_name: str  
-    response: str
-
-    
-class InnerPeerReviewFormat(BaseModel):
-    improvement_points: List[str]
-    score: int 
-
-class PeerReviewFormat(BaseModel):
-    agent_name: str
-    reviews: Dict[str, InnerPeerReviewFormat]
-
-#===============================================================================================================================
-#-------------------------------------------- PROMPTS GENERATION FOR ALL TASKS--------------------------------------------------
-#===============================================================================================================================
 
 
 #===========================================================================
-#------------------------- GET_QUERY_ANALYSIS_PROMPT -----------------------
+#---------------------- PROMPTS GENERATION FOR ALL TASKS -------------------
 #===========================================================================
-def get_query_analysis_prompt(tools_descriptions_str: str, query_types_str: str) -> ChatPromptTemplate:
+
+
+#---------------------------------------------------------------------------
+#----------------------- GET_QUERY_ANALYSIS_PROMPT_1() ---------------------
+#---------------------------------------------------------------------------
+def get_query_analysis_prompt_1(tools_descriptions_str: str, query_types_str: str) -> ChatPromptTemplate:
     """
     Generates the ChatPromptTemplate for the query analysis phase.
 
@@ -50,13 +35,14 @@ def get_query_analysis_prompt(tools_descriptions_str: str, query_types_str: str)
         query_types_str: A formatted string listing the possible query types.
 
     Returns:
-        A ChatPromptTemplate object ready to be used by the agent.
+        A ChatPromptTemplate_1 object to be used by Executor (!)
     """
-    logging.info(f"{my_name()}:  tools: {tools_descriptions_str} and \n query types: {query_types_str}")
+    # logging.info(f"{my_name()}:  tools: {tools_descriptions_str} and \n query types: {query_types_str}")
     # Define the system message content
     system_message_content = (
-        "You are an expert query classifier and prompt engineer. \n"
-        "Your job is to analyze the user query and gather all missing information.\n"
+        "You are an expert in analyzing user queries and running the tools for finding relevant context. \n"
+        "You work with the user using HITL_tool, to clarify all additional information. \n"
+        "You work with other search tools to gather all relevant information.\n"
     )
 
     # Define the human message template string using an f-string.
@@ -64,49 +50,79 @@ def get_query_analysis_prompt(tools_descriptions_str: str, query_types_str: str)
     # '{input}' remains as the placeholder for the dynamic user query.
     human_message_template_string = f"""Your task is to collect all relevant information from the user and external tools, 
     , based on the user’s query ***{{input}}***.
-  For that, you MUST execute the following steps:
-  1. Classify the query into one and only one query_type from the list: ***{query_types_str}***.
-  2. Define the query_class as 'SIMPLE' or 'COMPLEX', based on the anticipated response complexity.
-  3. CALL the internal 'HITL_tool' to get clarifications from the user. NEVER recommend the HITL_tool to your agents - do it yourself to create a better prompt! 
-  4. CALL one or a few of the tools {tools_descriptions_str} 
-  5. Create a single prompt_for_agents, using:
-     - the original user's query.
-     - Additional user input from HITL_tool call (if available).
-     - (optional) results from other internal tools that you called. 
-     - (optional) the list of tools from ***{tools_descriptions_str}*** that  agents should execute. 
-     Use the EXACT tool names from this list of tools, without changing them for readibility.
-     E.g. use 'WikipediaQueryRun", do NOT use a short form like 'Wikipedia'. 
-  Use best prompt engineering practices to create a prompt that will help your agents to do their job.
+    For that, you MUST execute the following steps:
+    1. Classify the query into one and only one query_type from this list: ***{query_types_str}***.
+    2. Define the query_class as 'SIMPLE' or 'COMPLEX', based on the anticipated response complexity.
+    3. CALL the internal 'HITL_tool' to get clarifications from the user. 
+    4. CALL one or several tools from this list: ***{tools_descriptions_str}*** to get additional context. 
 
-RETURN FORMAT:
-You MUST return a JSON object with exactly FOUR fields, no extra text:
-* 'query_type' (a string)
-* 'query_class': 'COMPLEX' if you want to use the team of agents, or 'SIMPLE' if you want to do it yourself.
-* 'prompt_for_agents' (a string). Could be a copy of the original query, or an improved version of it, based on the user input and the tools output.
-* 'recommended_tools' (a list of strings) from {tools_descriptions_str} that you want the agents to use. 
-   Use the EXACT tool names from this list of tools, without changing them for readibility. 
-   E.g. use 'WikipediaQueryRun", do NOT use a short form like 'Wikipedia'. 
-Always keep the language of the query (e.g a query in Spanish could be improved only in Spanish, if at all)
-Do NOT include any extra text, markers, or schema in your reply, — just the JSON.
+    RETURN FORMAT:
+    You MUST return a JSON object with exactly THREE fields, no extra text:
+    * 'query_type' (a string): the query type from the list: ***{query_types_str}***.
+    * 'query_class': 'COMPLEX' if you want to use the team of agents, or 'SIMPLE' if you want to do it yourself.
+    * 'improved_query' (a string): an improved version of the original query, 
+    based on the user information from HITL_tool, as well as other tools' output.
+
+    Always keep the language of the query (e.g a query in Spanish could be improved only in Spanish, if at all)
+    Do NOT include any extra text, markers, or schema in your reply, — just the JSON.
 """
 
     # Create the ChatPromptTemplate object
     prompt_template = ChatPromptTemplate.from_messages([
         ("system", system_message_content),
         ("human", human_message_template_string),
-        MessagesPlaceholder(variable_name="agent_scratchpad"), # Essential for agent memory/history
+        MessagesPlaceholder(variable_name="agent_scratchpad") # Essential for agent memory/history
     ])
     
     # No formatting happens here; return the template object itself
     return prompt_template
 
+#---------------------------------------------------------------------------
+#----------------------- GET_QUERY_ANALYSIS_PROMPT_2() ---------------------
+#---------------------------------------------------------------------------
+def get_query_analysis_prompt_2(improved_query:str, tools_descriptions_str: str) -> str:
+    """
+    Generates the ChatPromptTemplate for agents' prompt generation .
+
+    This version embeds static context (tool descriptions, query types) directly
+    into the prompt string, expecting only 'input' and 'agent_scratchpad'
+    variables at runtime.
+
+    Args:
+        tools_descriptions_str: A formatted string listing available tools and their descriptions.
+        
+    Returns:
+        A ChatPromptTemplate object ready to be used by the agent.
+    """
+    # Define the human message template string using an f-string.
+    # Static context (tools_descriptions_str, query_types_str) is embedded directly.
+    # '{input}' remains as the placeholder for the dynamic user query.
+    prompt = f"""Your task is to create a prompt for the AI agent, 
+    based on the query ***{improved_query}***.
+    For that, you MUST execute the following steps: \n
+    1. Analyze the query and convert it into the best prompt for AI agents\n. 
+    2. Select one or several tools from this list: ***{tools_descriptions_str}*** for the AI agent to get additional context. \n
+
+    RETURN FORMAT:
+    You MUST return a JSON object with exactly TWO fields, no extra text:\n
+    * 'prompt_for_agents' (a string): the prompt for the AI agents, based on the query.\n
+    You can keep the original query if you believe it is a good prompt for the agents. \n 
+    * 'recommended_tools' (a list of strings): a list of recommended tools for the agents to execute.\n
+
+    Always keep the language of the query (e.g a query in Spanish could be improved only in Spanish, if at all)
+    Do NOT include any extra text, markers, or schema in your reply, — just the JSON.
+    """
+    # No formatting happens here; return the string
+    return prompt
 
 
-def get_response_generation_prompt(query, query_type, criteria):
+#---------------------------------------------------------------------------
+#---------------------- GET_RESPONSE_GENERATION_PROMPT() -------------------
+#---------------------------------------------------------------------------
+def get_response_generation_prompt(query):
     # Define the template with explicit message objects
     template = ChatPromptTemplate.from_messages([
         ("system", "You are a response generator. Your task is to create a response for the user’s query. "
-            "Focus on these criteria: {criteria}. "
             "Match the query’s language (e.g., Russian query = Russian response) unless told otherwise. "
             "Return a plain string—no Unicode escapes (use 'В' not '\\u0412'). "
             "Use tools if available. Do NOT include markers or extra text—just the response."
@@ -117,37 +133,41 @@ def get_response_generation_prompt(query, query_type, criteria):
     # Format with inputs
     formatted_prompt = template.format_messages(
         query=query,
-        query_type=query_type,
-        criteria=", ".join(criteria)
     )
-    logging.info(f"{my_name}: {formatted_prompt}")
+    # logging.info(f"{my_name}: {formatted_prompt}")
     return formatted_prompt
 
-def get_peer_review_prompt(query, responses, criteria):
+#---------------------------------------------------------------------------
+#-------------------------- GET_PEER_REVIEW_PROMPT() -----------------------
+#---------------------------------------------------------------------------
+def get_peer_review_prompt(query, responses):
     # Define the template with explicit message objects
     template = ChatPromptTemplate.from_messages([
-        ("system", "You are a peer reviewer. Your job is to evaluate responses to a query based on these criteria: {criteria}. "
+        ("system", "You are a peer reviewer. Your job is to evaluate responses to a query. "
         ),
         ("human", "Review these responses to the query ***{query}***:\n"
             "{responses}. For each response, provide: "
             "- 'improvement_points': a list of 2-5 actionable suggestions. "
             "- 'score': an integer from 1 (lowest) to 100 (highest). Be fair but harsh. "
             "Return a JSON object where keys are agent names and values are objects with 'improvement_points' and 'score'. "
-            "Do NOT include extra text—just the JSON."
+            "only use currency symbols inside quoted strings."
+            "Do NOT include any extra text — just the JSON."
         )
     ])
     
     # Format with inputs
     formatted_prompt = template.format_messages(
         query=query,
-        responses=json.dumps(responses, ensure_ascii=False, indent=2),
-        criteria=", ".join(criteria)
+        responses=responses
     )
-    logging.info(f"{my_name}: {formatted_prompt}")
+    # logging.info(f"{my_name}: {formatted_prompt}")
 
     return formatted_prompt
 
-def get_iterations_prompt(query, criteria, response, improvement_points, user_feedback=None):
+#---------------------------------------------------------------------------
+#---------------------------- GET_ITERATION_PROMPT() -----------------------
+#---------------------------------------------------------------------------
+def get_iteration_prompt(query, response, improvement_points):
     # Define the template with explicit message objects
     template = ChatPromptTemplate.from_messages([
         ("system", 
@@ -155,11 +175,9 @@ def get_iterations_prompt(query, criteria, response, improvement_points, user_fe
             "Your task is to refine the given response based on specific improvement points."
         ),
         ("human",
-           "Refine this response to the query ***{query}*** based on criteria ***{criteria}***:\n"
-            "Original Response: ***{response}***\n\n"
-            "Address these specific improvement points:\n"
+           "Refine this response ***{response}*** to the query ***{query}*** :\n"
+            "Address these  improvement points:\n"
             "{improvement_points}\n\n"
-            "If provided, prioritize this user feedback: ***{user_feedback}***. "
             "You MUST:\n"
             "- Reuse the original response as the base, modifying it to incorporate each improvement point.\n"
             "- Ensure the new response is noticeably different and improved, not a copy.\n"
@@ -174,15 +192,15 @@ def get_iterations_prompt(query, criteria, response, improvement_points, user_fe
     
     formatted_prompt = template.format_messages(
         query=query,
-        criteria=", ".join(criteria),
         response=response,
-        improvement_points=formatted_improvements,
-        user_feedback=user_feedback if user_feedback else "None"
+        improvement_points=formatted_improvements
     )
-    logging.info(f"{my_name}: {formatted_prompt}")
+    # logging.info(f"{my_name}: {formatted_prompt}")
     return formatted_prompt
 
-
+#---------------------------------------------------------------------------
+#------------------ GET_REVIEW_IMPROVEMENT_POINTS_PROMPT() -----------------
+#---------------------------------------------------------------------------
 def get_review_improvement_points_prompt(query: str, improvement_points: list[str])-> list[str]:
     # shorten and rationalize a list of improvement points 
     template = ChatPromptTemplate.from_messages([
@@ -208,6 +226,42 @@ def get_review_improvement_points_prompt(query: str, improvement_points: list[st
         query=query,
         improvement_points=", ".join(improvement_points)
     )
-    logging.info(f"{my_name}: {formatted_prompt}")
+    # logging.info(f"{my_name}: {formatted_prompt}")
 
     return formatted_prompt
+
+#---------------------------------------------------------------------------
+#---------------------- GET_FEEDBACK_REQUEST_PROMPT() -------------------
+#---------------------------------------------------------------------------
+def get_feedback_request_prompt(winner_response: str, winner_score: int, improvement_points: list[str] )-> ChatPromptTemplate:
+    
+    # Define the system message content
+    system_message_content = (
+        "You are an expert in interactions with human using the HITL_tool to clarify user's feedback. \n"
+    )
+
+    # Define the human message template string using an f-string.
+    human_message_template_string = f"""Your task is to check with the user if the user has any 
+     feedback on the final response . For that, you should:
+      - present the user the final winner response ***{winner_response}***, 
+      winner score ***{winner_score}*** and improvement points ***{improvement_points}***. 
+      - then, check for user's feedback, possibly engaging into a dialog. 
+      Let the user know that if he or she types: "break", "stop", "enough" or similar, 
+      you will stop the interaction. 
+    
+    RETURN FORMAT:
+    You MUST return a result of your dialog with the user, based on the HITL_tool input or a word "break" 
+    if the user decides to stop the work. 
+
+    Do NOT include any extra text, markers, or schema in your reply, — just the user input.
+"""
+
+    # Create the ChatPromptTemplate object
+    prompt_template = ChatPromptTemplate.from_messages([
+        ("system", system_message_content),
+        ("human", human_message_template_string),
+        MessagesPlaceholder(variable_name="agent_scratchpad") # Essential for agent memory/history
+    ])
+    
+    # No formatting happens here; return the template object itself
+    return prompt_template

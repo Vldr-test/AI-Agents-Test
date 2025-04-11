@@ -1,74 +1,90 @@
-
-
-import os
 import json
 import json5
 import demjson3
 import logging
-from typing import Type, List, Dict, Optional, Tuple, Union, Any
-from pydantic import BaseModel, ValidationError  
+from typing import Type, Optional, Union
+from pydantic import BaseModel, ValidationError
 import re
-import inspect
-from peer_review_config import QueryAnalysisFormat, my_name
+import ast
+from peer_review_config import my_name
 
-
-
-
-#===============================================================================================================================
-#---------------------------------------------------- DICT_FROM_STR() ----------------------------------------------------------       
-#===============================================================================================================================
-
+#====================================================================
+#-------------------------- DICT_FROM_STR() -------------------------
+#====================================================================
 def dict_from_str(llm_output: str, Pydantic_format: Optional[Type[BaseModel]] = None):
     """
-    Tries to turn an LLM's output (a string) into a valid dict and validate it with a Pydantic objmodel if provided.
-    Args:
-        llm_output: The raw string from an LLM (could be JSON, could be messy).
-        Pydantic_format: The Pydantic model we want to use for validation (optional).
-    Returns: a valid dict or a Pydantic object, or None   
+    Converts an LLM's output string into a dict/list, using Pydantic for validation only.
+    Returns the validated root data (if Pydantic is used) or the parsed object.
     """
- 
-    json_obj = json_to_dict(llm_output) # Try to fix the JSON string and get the parsed JSON object
-    if json_obj is None:
-        logging.error(f"{my_name()}: Failed to fix JSON string: {llm_output}")
+    parsed_obj = json_to_dict(llm_output)
+    if parsed_obj is None:
+        logging.error(f"{my_name()}: Failed to parse string: {llm_output[:200]}...")
         return None
 
     if Pydantic_format:
         try:
-            pydantic_obj = Pydantic_format.model_validate(json_obj)  
-            return pydantic_obj
+            pydantic_obj = Pydantic_format.model_validate(parsed_obj)
+            return pydantic_obj.model_dump()
         except ValidationError as e:
             logging.error(f"{my_name()}: Pydantic validation failed: {e}")
             return None
+        except Exception as e:
+            logging.error(f"{my_name()}: Unexpected error during validation: {e}")
+            return None
     else:
-        return json_obj  # without validation 
-    
+        return parsed_obj   # return the parsed dict or list without validation
 
-#===============================================================================================================================
-#---------------------------------------------------- JSON_TO_DICT() -----------------------------------------------------------       
-#===============================================================================================================================
-def json_to_dict(text: str) -> Optional[dict]:
-    """Converts a potentially malformed JSON string from LLM output into a dictionary or None."""
-    
-    text = text.replace("```json", "").replace("```", "").strip()
-    
-    # Simple repair: if it starts with '{' but doesn't end with '}', append '}'. This is an ugly manual hack :( 
-    if text.startswith('{') and not text.endswith('}'): text += '}'
-    
-    # first try it simple: 
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as e:
-        logging.error(f"{my_name()}: JSON simple parsing failed for: {text}. Error: {str(e)}")
 
+#====================================================================
+#-------------------------- JSON_TO_DICT() --------------------------
+#====================================================================
+def json_to_dict(text: str) -> Optional[Union[dict, list]]:
+    """Converts a potentially malformed JSON or Python literal string into a dictionary or list."""
+    if not isinstance(text, str):
+        logging.error(f"{my_name()}: Input is not a string, received type {type(text)}")
+        return None
+
+    text = text.strip()
+    if not text or text in ['{}', '[]']:
+        logging.warning(f"{my_name()}: Empty or trivial input received.")
+        return {} if text == '{}' else []
+
+    # Remove markdown code fences
+    text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\s*```$', '', text, flags=re.MULTILINE)
+    text = text.strip()
+
+    # Preprocess common LLM issues
+    # text = re.sub(r"(?<!\\)'", '"', text.replace("\\'", "'"))  # Single to double quotes
+    text = re.sub(r',(\s*[}\]])', r'\1', text)  # Remove trailing commas
+    # text = text.replace('\\', '\\\\')  # Escape backslashes
+
+    # Repair incomplete structures
+    if text.startswith('{') and not text.endswith('}'):
+        text += '}'
+    elif text.startswith('[') and not text.endswith(']'):
+        text += ']'
+
+    parsers = [json.loads, json5.loads, demjson3.decode]
+    parser_names = ["json", "json5", "demjson3"]
+    errors = []
+
+    for parser, name in zip(parsers, parser_names):
+        try:
+            return parser(text)
+        except Exception as e:
+            errors.append(f"{name}: {str(e)}")
+
+    # Try parsing as Python literal
     try:
-        return json5.loads(text)
-    except ValueError as e:
-        logging.error(f"{my_name()}: json5 parsing failed for: {text}. Error: {str(e)}")
-    
-    try:
-        # demjson3 can attempt to repair and parse malformed JSON
-        return demjson3.decode(text)
-    except demjson3.JSONDecodeError as e:
-        logging.error(f"{my_name()}: demjson3 simple parsing failed for: {text}. Error: {str(e)}")
-    
+        evaluated_obj = ast.literal_eval(text)
+        if isinstance(evaluated_obj, (dict, list)):
+            logging.info(f"{my_name()}: Successfully parsed as Python literal.")
+            return evaluated_obj
+        logging.warning(f"{my_name()}: ast.literal_eval resulted in non-dict/list type: {type(evaluated_obj)}")
+        return None
+    except (ValueError, SyntaxError,TypeError, MemoryError, RecursionError) as e:
+        errors.append(f"ast.literal_eval: {str(e)}")
+
+    logging.error(f"{my_name()}: All parsing attempts failed for: {text}... Errors: {'; '.join(errors)}")
     return None

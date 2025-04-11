@@ -6,11 +6,12 @@
 #===============================================================================================================================
 
 USE_REAL_THREADS = True             # controls threading model; if False, uses Python asyncio threads 
+MAX_ITERATIONS = 2                  # max number of self improving iterations 
 
 import logging
 import inspect  # Added for my_name lambda
 from langchain.chat_models import init_chat_model
-from pydantic import BaseModel, RootModel, ValidationError  
+from pydantic import BaseModel, RootModel, ValidationError, Field  
 import asyncio
 from typing import Type, List, Dict, Optional, Tuple, Union, Any
 
@@ -29,13 +30,37 @@ AVAILABLE_AGENT_LLMS = [
 ]
 
 QUERY_TYPES = {
-    "CREATIVE_WRITING": ["creativity", "originality", "coherence"],
-    "SOFTWARE_PROGRAMMING": ["accuracy", "efficiency", "readability"],
-    "MATH": ["precision", "clarity", "logic"],
-    "TRANSLATION": ["accuracy", "fluency", "clarity", "grammar"],
-    "SUMMARIZATION": ["coverage_of_key_points", "conciseness", "clarity"],
-    "REAL_TIME_DATA_QUERY": ["accuracy", "factual_correctness"],
-    "OTHER": ["quality"]
+    "CREATIVE_WRITING": { 
+        "criteria": ["creativity", "originality", "coherence"],
+        "test_query" : "Write a short poem (sonnet form if possible) from the perspective of a city pigeon observing commuters during rush hour."
+    },
+    "SOFTWARE_PROGRAMMING": {
+        "criteria":["accuracy", "efficiency", "readability"],
+        "test_query": "Provide a Python code snippet to calculate the Levenshtein distance between two strings. Include a brief explanation."
+    },
+    "MATH": {
+        "criteria": ["precision", "clarity", "logic"],
+        "test_query": ""
+    },
+    "TRANSLATION": {
+        "criteria": ["accuracy", "fluency", "clarity", "grammar"],
+        "test_query": "Translate the English idiom 'barking up the wrong tree' into natural-sounding Hebrew and Russian, and briefly explain the meaning conveyed in each language"
+    },
+    "SUMMARIZATION": {
+        "creteria" : ["coverage_of_key_points", "conciseness", "clarity"],
+        "test_query": ""
+    },
+    "REAL_TIME_DATA_QUERY": {
+        "criteria": ["accuracy", "factual_correctness"],
+        "test_query": ""
+    },
+    "OTHER": {
+        "criteria": ["quality"],
+        "test_query": [
+            "Plan a weekend trip for me next month, considering weather, budget, and some fun activities, but I’m not sure where to go yet.",
+            "I want to learn a new skill online that could help my career, but I'm overwhelmed by options. Suggest 2-3 potential skills relevant for 'future-proofing' a career in marketing, and outline a basic first step for learning one of them."
+            ]
+    }
 }
  
 from langchain_community.utilities import WikipediaAPIWrapper, SerpAPIWrapper, OpenWeatherMapAPIWrapper 
@@ -225,7 +250,7 @@ QUERY_TYPES_TEMPERATURE = {
 }
 
 # Configure logging
-logging.basicConfig(level=logging.ERROR, handlers=[logging.StreamHandler()], force=True)
+logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler()], force=True)
 
 # Function to get current function name for logging
 my_name = lambda: inspect.currentframe().f_back.f_code.co_name
@@ -242,13 +267,23 @@ class SimpleResponseFormat(RootModel[dict[str, str]]):
 #-----------------------------------------------------------------------------------------------------------------------
 
 # response from query_analysis
-class QueryAnalysisResponseFormat(BaseModel):
-    query_type: str                         # type of query; e.g. "SOFTWARE_PROGRAMMING", "CREATIVE_WRITING", etc.
-    query_class: str                        # "COMPLEX" or "SIMPLE"
-    prompt_for_agents: str                  # improved prompt that includes tools, etc. 
-    recommended_tools: Optional[List[str]] = None     # names of tools to be used by agents 
+class QueryAnalysisResponseFormat_1(BaseModel):
+    query_type: str = Field(..., description="Type of the query")
+    query_class: str = Field(..., description="Class of the query")
+    improved_query: str = Field(..., description="Improved version of the query")
+    
 
-  
+class QueryAnalysisResponseFormat_2(BaseModel):
+    prompt_for_agents: str = Field(..., description="Prompt for agents")
+    recommended_tools: Optional[List[str]] = Field(None, description="Names of tools to be used by agents")
+
+class IterationWinnerFormat(BaseModel): 
+    name: str = Field(..., description="Name of the winner agent's llm")
+    response: str = Field(..., description="Response of the winner")
+    avg_score: int = Field(..., description="Winner's agent average score")
+    improvement_points: List[str] = Field(..., description="Winner's agent improvement points")
+    scores_table: Dict[str, int] = Field(..., description= "Table of average scores per each agent")
+
 #--------------------------------------------------------------------------------------------------------------------------
 
 # internal class
@@ -262,5 +297,5 @@ class PeerReviewResponseFormat(RootModel[dict[str, InnerPeerReviewFormat]]):
 #------------------------------------------------------------------------------------------------------
 
 # plain list of strings for improvement points: 
-class ImprovementPointsFormat(RootModel):
-    root: List[str]
+# class ImprovementPointsFormat(RootModel):
+#    root: List[str]

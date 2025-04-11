@@ -1,20 +1,34 @@
 # peer_review_team.py
 
-import peer_review_config as cfg
-from peer_review_config import AVAILABLE_TOOLS, USE_REAL_THREADS, QueryAnalysisFormat, SimpleResponseFormat, PeerReviewResponseFormat, ImprovementPointsFormat, my_name
-from peer_review_prompts import get_query_analysis_prompt, get_response_generation_prompt, get_peer_review_prompt, get_iterations_prompt, get_review_improvement_points_prompt
+from peer_review_config import (
+    USE_REAL_THREADS, MAX_ITERATIONS, QUERY_TYPES, 
+    SimpleResponseFormat, PeerReviewResponseFormat, IterationWinnerFormat, 
+    my_name
+)
+
+from peer_review_prompts import (
+    get_response_generation_prompt, get_peer_review_prompt, 
+    get_iteration_prompt, get_review_improvement_points_prompt
+)
+
 from peer_review_utils import dict_from_str 
+
+from analyze_query import LeaderAgent
 
 import time
 from dotenv import load_dotenv
 import logging
 from langchain.chat_models import init_chat_model
 from langchain_google_genai import ChatGoogleGenerativeAI
-#from langchain_anthropic import ChatAnthropic
-#from langchain_community.chat_models import ChatOpenAI
+
+
+from analyze_query import LeaderAgent
+
 import asyncio
 if USE_REAL_THREADS: from concurrent.futures import ThreadPoolExecutor 
 from langchain_core.language_models import BaseChatModel
+
+from langchain.tools import BaseTool
 
 from pydantic import BaseModel, ValidationError
 import asyncio
@@ -44,100 +58,75 @@ class AgentTeam:
 
     def __init__(self):
         """Initialize team with leader and agents."""
-        self.agent_models = []
-        self.leader_model = None
+        self.agent_models: "List[BaseChatModel]" = []
+        self.leader_model: "BaseChatModel" = None
+        self.state: "List[IterationWinnerFormat]" = [] #  stores info about each iteration's winner 
 
+    #====================================================================
+    #--------------------------- INITIALIZE() ---------------------------
+    #====================================================================
+    def initialize(self, agent_llm_names: List[str], 
+                    leader_llm_name: Optional[str] = None)-> Tuple[str, List[str]]:
+        """
+            Initialize actual LLM instances with Langchain. 
+            Args: llm agents' names. 
+            Leader llm doesn't do much besides harmonizing improvement points; 
+                if not provided, first instantiated agent plays the leader role  
+            Return: actual leader name, actual agent names 
+        """
+        agent_name: str = None
 
-    def initialize_team(self, leader_llm_name: str, agent_llm_names: List[str])-> Tuple[str, List[str]]:
-        # Initialize actual LLM instances with Langchain. Return: actual leader name, actual agent names, 
-        try:
-            self.leader_model = init_chat_model(model= leader_llm_name)
-            logging.info(f"{my_name()}: Successfully created a model for the leader: { leader_llm_name}")
-        except Exception as e:  # need to be more specific about the exception type
-            logging.error(f"{my_name()}: Can't create a model for the leader: { leader_llm_name}")
-            raise e
-
+        # create agents 
         for agent_name in agent_llm_names:
             try:
                 self.agent_models.append(init_chat_model(agent_name))
                 logging.info(f"{my_name()}: Successfully created a model for agent: {agent_name}")
             except Exception as e:
-                logging.error(f"{my_name()}: Can't create a model for agent: {agent_name}")
+                logging.error(f"{my_name()}: Can't create a model for agent: {agent_name}: {e}")
                 continue
         
+        if self.agent_models is None:
+            logging.error(f"{my_name()}: Can't create even one agent. Exiting")
+            raise RuntimeError("Can't create even one agent. Exiting")
+        
+        # create leader. If name is not provided, pick the first agent: 
+        if leader_llm_name is None:
+            self.leader_model = self.agent_models[0]
+        else:    
+            try:
+                self.leader_model = init_chat_model(leader_llm_name) 
+                logging.info(f"{my_name()}: Successfully created a model for leader: {leader_llm_name}")
+            except Exception as e:
+                logging.error(f"{my_name()}: Can't create a model for leader: {leader_llm_name}")
+                self.leader_model = self.agent_models[0] # fall back to the first agent
+
         # return actual names:
         return get_model_name(self.leader_model), [get_model_name(agent) for agent in self.agent_models]
         
 
     #====================================================================
-    #----------------------- ANALYZE_QUERY() ----------------------------
-    #====================================================================
-    def analyze_query(self, query: str) -> Tuple[str, List[str], Optional[str]]:
-        """
-        Analyze query and return type, recommended tools, and improved query.
-
-        Returns:
-            Tuple[str, List[str], Optional[str]]: A tuple containing:
-                - query_type (str): The type of the query.
-                - recommended_tools (List[str]): A list of recommended tools.
-                - improved_query (Optional[str]): An improved version of the query, or None.
-        """
-        logging.info(f"{my_name()}: Analyzing query: {query}")
-        prompt = get_query_analysis_prompt(query, AVAILABLE_TOOLS)
-
-        # enforce json output:
-        # structured_model = self.leader_model.with_structured_output(QueryAnalysisFormat)
-
-        response = ""
-
-        try:
-            llm_response = self.leader_model.invoke(input=prompt)
-            logging.info(f"{my_name()}: Raw response from leader model: {response}")
-
-            # Clean up json and return object: 
-            response = dict_from_str(llm_response.content, QueryAnalysisFormat)
-            if response is None:
-                logging.error(f"{my_name()}: Failed to parse response from leader model: {response}")
-                raise ValueError("Failed to parse response from leader model")
-            
-            logging.info(f"{my_name()}: Parsed response from leader model: {response}")
-            
-            # Access the attributes directly from the Pydantic object
-            query_type = response.query_type
-            recommended_tools = response.recommended_tools
-            improved_query = response.improved_query
-
-            logging.info(f"{my_name()}: Parsed response: query_type: {query_type}, recommended_tools: {recommended_tools}, improved_query: {improved_query}")
-
-            return query_type, recommended_tools, improved_query
-
-        except ValidationError as e:
-            logging.error(f"{my_name()}: error: {e}")
-            return None, None, None      # have to write recovery code!                                                              
-    
-
-    #====================================================================
     #---------------------- GENERATE_RESPONSES() ------------------------
     #====================================================================
 
-    def generate_responses(self, query: str, query_type: str, criteria: List[str]) -> SimpleResponseFormat:
+    def generate_responses(self, query: str, 
+                        tools: Optional[List[BaseTool]]) -> SimpleResponseFormat:
         # Generate the prompt for the models
-        prompt = get_response_generation_prompt(query, query_type, criteria)
+
+        prompt = get_response_generation_prompt(query)
         
         # Log the query details for debugging
-        logging.info(f"{my_name()}: {query}, {query_type}, {criteria}")
+        logging.info(f"{my_name()}: {query}")
 
         responses = asyncio.run(self.async_generate_responses(self.agent_models, prompt))
 
         # no Json validation required, as this is just initial responses in free text 
-
         logging.info(f"{my_name()}\n completed with {responses} ")
 
         return responses
 
 
     #====================================================================
-    #---------------------- ASYNC_GENERATE_RESPONSES() ------------------------
+    #---------------------- ASYNC_GENERATE_RESPONSES() ------------------
     #====================================================================
     async def async_generate_responses(self, agents:List[BaseChatModel], prompt = str)-> Dict[str, str]:
         """
@@ -158,9 +147,10 @@ class AgentTeam:
         # Log the query details for debugging
         logging.info(f"{my_name()}: starting")
 
+        #--------------------------------------------------------------------------------------------
         # Define the helper function to call a model asynchronously and return its name and response.
         # Required to bind responses to model names 
-        #--------------------------------------------------------------
+        #--------------------------------------------------------------------------------------------
         async def call_model(agent):
             # Get the model's name
             name = get_model_name(agent)       
@@ -174,8 +164,9 @@ class AgentTeam:
                     response = await loop.run_in_executor(executor, lambda: agent.invoke(prompt))
                 else:
                     response = await agent.ainvoke(input=prompt)
-                end_time = time.time()
-                logging.info(f"{my_name()}: model {name} started at {start_time}. Execution took {end_time - start_time} seconds")
+                
+                execution_time = time.time() - start_time
+                logging.info(f"{my_name()}: model {name}. Execution took {execution_time:.2f} seconds")
                 return name, response
             except Exception as e:
                 # Log any errors that occur during the model call
@@ -196,7 +187,7 @@ class AgentTeam:
             
             # Check if we got a valid response
             if response is not None:
-                logging.info(f"{my_name()}: Received response from {name}. It took {time.time() - start_time} seconds.")
+                # logging.info(f"{my_name()}: Received response from {name}. It took {time.time() - start_time} seconds.")
                 responses[name] = response.content  # Responses are AIMessages! 
             else:
                 logging.error(f"{my_name()}: No response from {name}")
@@ -212,10 +203,10 @@ class AgentTeam:
 
 
     #====================================================================
-    #-----------------------GENERATE_PEER_REVIEWS() ---------------------
+    #---------------------- GENERATE_PEER_REVIEWS() ---------------------
     #====================================================================
     def generate_peer_reviews(self, 
-        query: str, criteria: List[str], responses: dict[str, str])-> PeerReviewResponseFormat:
+        query: str, responses: dict[str, str])-> PeerReviewResponseFormat:
         """
             Perform peer review and return a PeerReviewFormat dict:
             { 
@@ -230,20 +221,16 @@ class AgentTeam:
         """
         logging.info(f"{my_name()} starting")
 
-        peer_review_prompt = get_peer_review_prompt(
-                query=query,
-                responses=responses,
-                criteria=criteria
-            )
+        peer_review_prompt = get_peer_review_prompt(query=query, responses=responses)
 
         try:
             reviews = asyncio.run( self.async_generate_responses(
                     # we ask the Leader to review - but only if same model is not there already 
                     agents=self.agent_models + [self.leader_model if not self.leader_model in self.agent_models else None],  
-                    prompt=peer_review_prompt,
+                    prompt=peer_review_prompt 
                     )
             )
-            logging.info(f"{my_name()}: Async peer review generated {len(responses)} results")
+            # logging.info(f"{my_name()}: Async peer review generated {len(responses)} results")
         except Exception as e:
             logging.error(f"{my_name()}: Error: {e}")
             raise e
@@ -252,8 +239,9 @@ class AgentTeam:
         
         # response contains { model_name : {score:int, improvement_points:list[str]}}. So we have to give the value:
         for reviewer_name, review in reviews.items():
-            logging.info(f"{my_name()}: parsing reviewer_name: {reviewer_name}, review: {review}")
+            # logging.info(f"{my_name()}: parsing reviewer_name: {reviewer_name}, review: {review}")
             parsed_review = dict_from_str(review, PeerReviewResponseFormat)
+            
             if parsed_review is None:
                 logging.error(f"{my_name()}: failed to parse JSON for {reviewer_name}.")
                 continue # Skip to the next agent
@@ -262,6 +250,7 @@ class AgentTeam:
                     parsed_reviews[reviewer_name] = parsed_review 
                     logging.info(f"{my_name()}: parsed_review for {reviewer_name}: {parsed_review}") 
                     # remove self-reviews if required: 
+                    # ... 
                 except Exception as e:
                     logging.error(f"{my_name()}: Error: {e}")
                     raise e
@@ -272,13 +261,13 @@ class AgentTeam:
         else:
             return parsed_reviews 
         
-#====================================================================
-#------------------- _REVIEW_IMPROVEMENT_POINTS() -------------------
-#====================================================================
+    #====================================================================
+    #------------------- _REVIEW_IMPROVEMENT_POINTS() -------------------
+    #====================================================================
     def _review_improvement_points(self, query: str, improvement_points: List[str])-> List[str]:
         """
-            rationalize improvement points 
-            return the improved list
+            Harmonize multiple improvement points - inner function 
+            Return the harmonized list
         """
         logging.info(f"{my_name()}: starting")
         prompt = get_review_improvement_points_prompt(query, improvement_points)
@@ -287,78 +276,101 @@ class AgentTeam:
 
         try:
             response = self.leader_model.invoke(input=prompt)
-            logging.info(f"{my_name()}: prompt {prompt}. \n response from leader model: {response.content}")
+            # logging.info(f"{my_name()}: prompt {prompt}. \n response from leader model: {response.content}")
             
-            # Parse the string response into a list using dict_from_str with RootModel
-            parsed_response = dict_from_str(response.content, ImprovementPointsFormat)
+            # Parse the string response into a list  
+            parsed_response = dict_from_str(response.content)
             if parsed_response is None:
                 logging.error(f"{my_name()}: Failed to parse improvement points: {response.content}")
                 return improvement_points  # Fallback to original points
         
-            # Return the list of strings directly from the root
-            return parsed_response.root
+            return parsed_response
             
         except ValidationError as e:
             logging.error(f"{my_name()}: error: {e}")
             return ""        
 
 
-#====================================================================
-#----------------------- ANALYZE_PEER_REVIEWS() ---------------------
-#====================================================================
-    def analize_peer_reviews(self, query: str, peer_reviews: PeerReviewResponseFormat)->Tuple[dict, str, int, List[str]]:
+    #====================================================================
+    #----------------------- ANALYZE_PEER_REVIEWS() ---------------------
+    #====================================================================
+    def analize_peer_reviews(self, 
+                        query: str,     # required to harmonize improvement points 
+                        peer_reviews: PeerReviewResponseFormat)->IterationWinnerFormat:
         """
             Accepts PeerReviewsRepsonseFormat object: {reviewing_agent: {'reviewed_agent': {improvement_points, score}}
             Calculates the averages and finds the winner. 
-            Returns: see below         
+            Returns: IterationWinnerFormat         
         """
         logging.info(f"{my_name()} starting")
 
-        score_table = {}                # agent_name : list[int] 
-        improvement_points_table = {}   # agent_name : list[str]
-        avg_scores = {}                 # agent_name : int
-        
-        winner_avg_score = 0
-        winner_improvement_points = []
+        score_table: "Dict[str : List[int]]" = {}               # agent_name : list[scores] 
+        improvement_points_table: "Dict[str, List[str]]" = {}   # agent_name : list[improvement_points]
+        avg_scores: "Dict[str: int]" = {}                       # agent_name : score
 
-        for reviewer_name, review in peer_reviews.items():
-            for reviewed, inner_review in review.root.items():
-                if reviewed not in score_table:
-                    score_table[reviewed] = []
-                score_table[reviewed].append(inner_review.score)
-                if reviewed not in improvement_points_table:
-                    improvement_points_table[reviewed] = []
-                improvement_points_table[reviewed].extend(inner_review.improvement_points)
+        # --- Iterate through the dictionary structure ---
+        for reviewer_name, review_data in peer_reviews.items():
+            
+            # 'review_data' is the inner dict like { reviewed_agent_name: {'score': ..., 'improvement_points': ...} }
+            for reviewed_agent_name, inner_review_dict in review_data.items():
+                
+                # 'inner_review_dict' is the dict {'score': ..., 'improvement_points': ...}
+                # Ensure reviewed_agent_name exists in tables before appending
+
+                if reviewed_agent_name not in score_table:
+                    score_table[reviewed_agent_name] = []
+
+                # --- Use dictionary key access ---
+                score_value = inner_review_dict.get('score') 
+                if score_value is not None and isinstance(score_value, int):
+                    score_table[reviewed_agent_name].append(score_value)
+                else:
+                    logging.error(f"{my_name()}: Invalid or missing 'score' for {reviewed_agent_name} from {reviewer_name}")
+
+                if reviewed_agent_name not in improvement_points_table:
+                    improvement_points_table[reviewed_agent_name] = []
+
+                # --- Use dictionary key access ---
+                points_list = inner_review_dict.get('improvement_points', []) # Use .get with default
+                if isinstance(points_list, list):
+                    improvement_points_table[reviewed_agent_name].extend(points_list)
+                else:
+                     logging.warning(f"{my_name()}: Invalid 'improvement_points' format for {reviewed_agent_name} from {reviewer_name}")
+                # --- End dictionary key access ---
                     
         for name, scores in score_table.items():
-            avg_scores[name] = int(sum(scores) / len(scores))
+            if scores: # Avoid division by zero
+                avg_scores[name] = int(sum(scores) / len(scores))
+            else:
+                avg_scores[name] = 0 # Assign 0 if no scores
 
         logging.info(f"\n{my_name()}: avg_scores: {avg_scores}")
 
         # find the winner with the highest avg:  
-        winner = max(avg_scores, key=avg_scores.get)
-        winner_avg_score = avg_scores[winner]
+        winner_name = max(avg_scores, key=avg_scores.get)
+        winner_avg_score = avg_scores[winner_name]
 
-        # enhance improvement points list:
-        winner_improvement_points = self._review_improvement_points(
-            query = query, improvement_points = improvement_points_table[winner])
-
-        logging.info(f"\n{my_name()}: winner: {winner}, winner_avg_score: {winner_avg_score}")
-        logging.info(f"\n{my_name()}: improvement_points type: {type(winner_improvement_points)}")
-        logging.info(f"\n{my_name()}: winner_improvement_points: {winner_improvement_points}")
+        # harmonize improvement points list:
+        improvement_points = self._review_improvement_points(
+            query = query, 
+            improvement_points = improvement_points_table[winner_name])
         
-        return avg_scores, winner, winner_avg_score, winner_improvement_points
+        return IterationWinnerFormat(
+            avg_score = winner_avg_score, 
+            response = "",          # will be filled in later 
+            improvement_points = improvement_points, 
+            name = winner_name,              
+            scores_table = avg_scores           
+        )
+        
             
     #====================================================================
-    #------------------GENERATE_ITERATIVE_IMPROVEMENT() -----------------
+    #----------------- GENERATE_ITERATIVE_IMPROVEMENT() -----------------
     #====================================================================    
-    def generate_iterative_improvement(
-        self, 
-        query: str, 
-        criteria:list[str], 
-        improvement_points:list[str], 
-        response: str, 
-        user_feedback: str = None
+    def generate_iterative_improvement(self, 
+            query: str, 
+            improvement_points:list[str], 
+            response: str
         )-> SimpleResponseFormat:    
         """
             Similar to generate_response. Prompt is the only difference 
@@ -366,24 +378,87 @@ class AgentTeam:
         # Log the query details for debugging
         logging.info(f"{my_name()}: starting")
 
-        prompt = get_iterations_prompt(query=query, criteria=criteria, response=response, improvement_points = improvement_points, user_feedback=user_feedback)
+        prompt = get_iteration_prompt(query=query, response=response, improvement_points = improvement_points)
 
         responses = asyncio.run(self.async_generate_responses(self.agent_models, prompt))
 
-        # no Json validation required, as this is just initial responses in free text 
-        logging.info(f"{my_name()}\n completed with prompt {prompt} and responses: {responses} ")
+        # no Json validation required, as these are just responses in free text 
+        logging.info(f"{my_name()}\n completed. Responses: {responses} ")
 
         return responses
     
+    #====================================================================
+    #----------------------- IMPROVEMENTS_LOOP() ------------------------
+    #====================================================================    
+    def improvements_loop(self, 
+                query:str,          
+                tools: Optional[List[BaseTool]] = None,             # could be used in future
+                max_iterations: Optional[int] = MAX_ITERATIONS      # internal iterations 
+                ) -> List[IterationWinnerFormat]: 
+         
+        iteration = 0
+        winner = None 
+
+        while True:
+          
+            logging.info(f"\niteration {iteration} started")
+
+            if iteration == 0:
+                responses = self.generate_responses(query = query, tools = tools) 
+            else:
+                # Ensure 'winner' from the previous iteration is available
+                if winner is None:
+                    logging.error("Cannot proceed with iteration > 0 without a winner from the previous step.")
+                    raise RuntimeError("Cannot proceed with iteration > 0 without a winner from the previous step.")
+                
+                responses = self.generate_iterative_improvement(query = query, 
+                            improvement_points = winner.improvement_points, 
+                            response = winner.response)
+            
+            logging.info(f"responses generated")
+            
+            peer_reviews = self.generate_peer_reviews(query=query, responses = responses)
+            logging.info(f"peer reviews done")
+      
+            winner = self.analize_peer_reviews(query = query, peer_reviews = peer_reviews)
+            # this field was returned empty
+            winner.response = responses.get(winner.name, "Error: Winner response not found" )    
+            self.state.append(winner)
+
+            logging.info(f"{my_name()} winner found: {winner.name}")
+            
+            if iteration >= max_iterations-1:
+                logging.info(f"{my_name()} Max iterations ({max_iterations}) reached.")
+                return self.state
+            else: iteration += 1
+
 
 #====================================================================
 #---------------------------- __MAIN__ -----------------------------
 #====================================================================
 if __name__ == "__main__":
     # Test instantiation
-    team = AgentTeam("gemini/gemini-2.0-flash", ["gemini/gemini-2.0-flash"])
-    query_type, recommended_tools, improved_query = team.analyze_query("What is the best moisturizer?")
-    print(f"Query Type: {query_type}")
-    print(f"Recommended Tools: {recommended_tools}")
-    print(f"Improved Query: {improved_query}")
-    print(team.generate_responses("Test query", "OTHER", ["accuracy"], ["Agent1", "Agent2"]))
+    
+    # query = "Plan a weekend trip for me next month, considering weather, budget, and some fun activities, but I’m not sure where to go yet."
+    query = QUERY_TYPES["OTHER"]["test_query"][1]
+
+    # leader = LeaderAgent("openai:gpt-4o-mini")
+    team = AgentTeam()
+    team.initialize(leader_llm_name = "openai:gpt-4o-mini", 
+                         agent_llm_names = ["google_genai:gemini-2.0-flash", "deepseek:deepseek-chat"])
+ 
+    prompt = query 
+    recommended_tools = []
+    winners = team.improvements_loop(query = prompt, 
+                        tools = recommended_tools, 
+                        max_iterations = MAX_ITERATIONS)
+    iter = 1
+    for winner in winners:
+        print(f"\n iteration {iter}: ")
+        print(f"Winner Name: {winner.name}")
+        # print(f"Winner Response: {winner.response}")
+        print(f"Winner Avg Score: {winner.avg_score}")
+        print(f"Winner response:{winner.response}")
+        iter += 1
+
+
