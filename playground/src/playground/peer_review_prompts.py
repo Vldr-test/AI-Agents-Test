@@ -1,6 +1,6 @@
 # peer_review_prompts
 
-from peer_review_config import QUERY_TYPES, WinnerFormat, my_name
+from peer_review_config import QUERY_TYPES, WinnerFormat, ActionChoiceEnum, my_name
 import json
 import logging
 from pydantic import BaseModel
@@ -22,7 +22,7 @@ from typing import Type, List, Dict, Optional, Tuple, Union, Any
 #---------------------------------------------------------------------------
 #----------------------- GET_QUERY_ANALYSIS_PROMPT_1() ---------------------
 #---------------------------------------------------------------------------
-def get_query_analysis_prompt_1(tools_descriptions_str: str, query_types_str: str) -> ChatPromptTemplate:
+def get_refine_query_prompt(tools_descriptions_str: str, query_types_str: str) -> ChatPromptTemplate:
     """
     Generates the ChatPromptTemplate for the query analysis phase.
 
@@ -81,9 +81,9 @@ def get_query_analysis_prompt_1(tools_descriptions_str: str, query_types_str: st
     return prompt_template
 
 #---------------------------------------------------------------------------
-#----------------------- GET_QUERY_ANALYSIS_PROMPT_2() ---------------------
+#                   GET_CONSTRUCT_PROMPT_WITH_TOOLS()  
 #---------------------------------------------------------------------------
-def get_query_analysis_prompt_2(improved_query:str, tools_descriptions_str: str) -> str:
+def get_construct_prompt_with_tools(improved_query:str, tools_descriptions_str: str) -> str:
     """
     Generates the ChatPromptTemplate for agents' prompt generation .
 
@@ -154,8 +154,8 @@ def get_peer_review_prompt(query, responses):
             "{responses}. For each response, provide: "
             "- 'improvement_points': a list of 2-5 actionable suggestions. "
             "- 'score': an integer from 1 (lowest) to 100 (highest). Be fair but harsh. "
-            "Return a JSON object where keys are agent names and values are objects with 'improvement_points' and 'score'. "
-            "only use currency symbols inside quoted strings."
+            "Return a JSON object where keys are agent names, and values are objects with 'improvement_points' and 'score'. "
+            "Only use currency symbols inside quoted strings."
             "Do NOT include any extra text — just the JSON."
         )
     ])
@@ -166,7 +166,6 @@ def get_peer_review_prompt(query, responses):
         responses=responses
     )
     # logging.info(f"{my_name}: {formatted_prompt}")
-
     return formatted_prompt
 
 #---------------------------------------------------------------------------
@@ -236,33 +235,51 @@ def get_review_improvement_points_prompt(query: str, improvement_points: list[st
     return formatted_prompt
 
 #---------------------------------------------------------------------------
-#---------------------- GET_FEEDBACK_REQUEST_PROMPT() -------------------
+#------------------------- GET_HUMAN_FEEDBACK_PROMPT() ---------------------
 #---------------------------------------------------------------------------
-def get_human_feedback_prompt(winner: WinnerFormat, tools_description: str)-> ChatPromptTemplate:
+def get_human_feedback_prompt(query: str, final_response: str, tools_description: str)-> ChatPromptTemplate:
     
     # Define the system message content
     system_message_content = (
-        "You are an expert in interactions with human using the HITL_tool to clarify user's feedback. \n"
+        "You are an expert in interactions with human using the HITL_tool. "
+        "You are concise, professional, and meticulous. "
+        "Your task is to discuss with the user the response, provided and self-scored by your team of agents. "
+        "Always keep the language of the original query (e.g. Spanish, German, English, Russian, etc.) "
+
     )
 
     # Define the human message template string using an f-string.
-    human_message_template_string = f"""Your task is to check with the user if the user has any 
-     feedback on the final response. For that, you should:
-      - present the user the final winner response ***{winner.response}***, 
-      winner score ***{winner.avg_score}*** and suggested improvement points ***{winner.improvement_points}***. 
-      - then, check for user's feedback, possibly engaging into a dialog and clarifying additional inputs, if required. 
-      Let the user know that if he or she types: "break", "stop", "enough" or similar, 
-      you will stop the interaction. An "Enter" means that user has no feedback to provide  
+    human_message_template_string = f"""Your task is to check user's feedback on the the final_response 
+    ***{final_response}*** to the query ***{query}*** and decide on the next steps. 
+    
+    This final_response has been already presented to the user, so you should NOT repeat it. 
+    
+    You should: 
+        - Understand user's feedback on the final response. Use the HITL_tool, and be concise, 
+            using as few clear questions as possible.  
+        - check what the user wants to do next, marking it in a JSON object with two fields:
+                'action': 'done' | 'stop' | 'continue',
+                'new_prompt': '<new query, enriched with the user feedback and other info>'
+            
+            -  if the user wants to STOP the flow, thank him or her. Then, you set the 'action' field 
+                in your response to 'stop' 
+            -  if the user is HAPPY with the final_response, you thank the user for the feedback and 
+                set the 'action' field to 'done'
+            -  If the user wants to re-generate the response, taking his/her feedback into account, you should:
+                - set the 'action' field to 'continue'
+                - generate a new_prompt for agents, containing the original query, 
+                    enriched with user's feedback and all other relevant information.     
+                    Make sure that the new_prompt harmonizes initial query with the new feedback from the user. 
+                         
+            In other cases, you could keep the 'new_prompt' field empty.  
+     
+    ALWAYS return your output in the JSON format. 
+    Do NOT include any extra text, markers, or schema in your reply, — just the JSON.
 
     TOOLS USAGE:
-    HITL_tool is the one to use with your interactions with the user. You have other tools at your disposal: 
+    HITL_tool is the one to use with your interactions with the user. You have other tools: 
     ***{tools_description}***. Please use them judiciously, only if required.  
-    
-    RETURN FORMAT:
-    You MUST return a string, summarizing your dialog with the user, based on the HITL_tool input - 
-    or a word "break" if the user decides to stop the work. 
-
-    Do NOT include any extra text, markers, or schema in your reply, — just the user input.
+       
     """
 
     # Create the ChatPromptTemplate object
@@ -272,5 +289,6 @@ def get_human_feedback_prompt(winner: WinnerFormat, tools_description: str)-> Ch
         MessagesPlaceholder(variable_name="agent_scratchpad") # Essential for agent memory/history
     ])
     
+    # logging.info(f"{my_name()}:  prompt_template: {prompt_template}")
     # No formatting happens here; return the template object itself
     return prompt_template

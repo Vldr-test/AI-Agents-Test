@@ -2,7 +2,7 @@
 
 from peer_review_config import (
     USE_REAL_THREADS, MAX_ITERATIONS, QUERY_TYPES, 
-    SimpleResponseFormat, PeerReviewResponseFormat, WinnerFormat, 
+    SimpleResponseFormat, PeerReviewResponseFormat, WinnerFormat, ActionChoiceEnum,
     my_name
 )
 
@@ -13,7 +13,7 @@ from peer_review_prompts import (
 
 from peer_review_utils import dict_from_str 
 
-from analyze_query import LeaderAgent
+from peer_review.leader import LeaderAgent
 
 import time
 from dotenv import load_dotenv
@@ -107,10 +107,13 @@ class AgentTeam:
     #====================================================================
     #---------------------- GENERATE_RESPONSES() ------------------------
     #====================================================================
-
     def generate_responses(self, query: str, 
                         tools: Optional[List[BaseTool]]) -> SimpleResponseFormat:
-        # Generate the prompt for the models
+        """
+            First-time response to the [improved] user query. 
+            tools are currently not used. 
+            Returns a dict {"agent_name": response_string}   
+        """
 
         prompt = get_response_generation_prompt(query)
         
@@ -130,10 +133,11 @@ class AgentTeam:
     #====================================================================
     async def async_generate_responses(self, agents:List[BaseChatModel], prompt = str)-> Dict[str, str]:
         """
-            Accepts a list of agents / models and a generic prompt (one for all models)
+            Helper function to run responses assynchronosly. 
+            Accepts a list of agents aka models and a generic prompt (one for all models)
             Returns a dict of:
             {   
-                { 'agent_name_str' : response}, where Any could be a dict or a string 
+                { 'agent_name_str' : response},  
                 ...
                 { 'agent_name_str': response}
             }
@@ -196,7 +200,7 @@ class AgentTeam:
             executor.shutdown(wait=True)
         
         total_processing_time = time.time() - start_time
-        logging.info(f"{my_name()}\n started at {start_time}. Completed in {total_processing_time} seconds")
+        logging.info(f"{my_name()}\n started at {start_time}. Completed in {total_processing_time:.2f} seconds")
 
         # Return the dictionary of model responses
         return responses
@@ -208,7 +212,7 @@ class AgentTeam:
     def generate_peer_reviews(self, 
         query: str, responses: dict[str, str])-> PeerReviewResponseFormat:
         """
-            Perform peer review and return a PeerReviewFormat dict:
+            Perform peer review and return a PeerReviewResponseFormat dict:
             { 
                 {
                 'agent_name': {'score': int, 'improvement_points': List[str] }, 
@@ -237,7 +241,13 @@ class AgentTeam:
         
         parsed_reviews = {}   # will store validated dictionaries
         
-        # response contains { model_name : {score:int, improvement_points:list[str]}}. So we have to give the value:
+        # note that in async_generate_responses() the reviewer agent name is 
+        # stitched to the response. "Reviews" is like: 
+        # {
+        #   reviewer_agent_name: 
+        #       {reviewed_agent_name1: {'score' : int, 'improvement_points': list[str]}} }, 
+        #       {reviewed_agent_name2: {'score' : int, 'improvement_points': list[str]}} },
+        # } 
         for reviewer_name, review in reviews.items():
             # logging.info(f"{my_name()}: parsing reviewer_name: {reviewer_name}, review: {review}")
             parsed_review = dict_from_str(review, PeerReviewResponseFormat)
@@ -267,7 +277,8 @@ class AgentTeam:
     def _review_improvement_points(self, query: str, improvement_points: List[str])-> List[str]:
         """
             Harmonize multiple improvement points - inner function 
-            Return the harmonized list
+            Returns the single harmonized list of improvements from multiple reviews, to remove 
+            repetitions 
         """
         logging.info(f"{my_name()}: starting")
         prompt = get_review_improvement_points_prompt(query, improvement_points)
@@ -298,7 +309,8 @@ class AgentTeam:
                         query: str,     # required to harmonize improvement points 
                         peer_reviews: PeerReviewResponseFormat)-> WinnerFormat:
         """
-            Accepts PeerReviewsRepsonseFormat object: {reviewing_agent: {'reviewed_agent': {improvement_points, score}}
+            Accepts PeerReviewsRepsonseFormat object: 
+                {reviewing_agent: {'reviewed_agent': {improvement_points, score}}
             Calculates the averages and finds the winner. 
             Returns: WinnerFormat         
         """
@@ -311,12 +323,11 @@ class AgentTeam:
         # --- Iterate through the dictionary structure ---
         for reviewer_name, review_data in peer_reviews.items():
             
-            # 'review_data' is the inner dict like { reviewed_agent_name: {'score': ..., 'improvement_points': ...} }
+            # 'review_data' is the inner dict like 
+            # { reviewed_agent_name: {'score': ..., 'improvement_points': ...} }
             for reviewed_agent_name, inner_review_dict in review_data.items():
                 
-                # 'inner_review_dict' is the dict {'score': ..., 'improvement_points': ...}
                 # Ensure reviewed_agent_name exists in tables before appending
-
                 if reviewed_agent_name not in score_table:
                     score_table[reviewed_agent_name] = []
 
@@ -331,11 +342,11 @@ class AgentTeam:
                     improvement_points_table[reviewed_agent_name] = []
 
                 # --- Use dictionary key access ---
-                points_list = inner_review_dict.get('improvement_points', []) # Use .get with default
+                points_list = inner_review_dict.get('improvement_points', [])  
                 if isinstance(points_list, list):
                     improvement_points_table[reviewed_agent_name].extend(points_list)
                 else:
-                     logging.warning(f"{my_name()}: Invalid 'improvement_points' format for {reviewed_agent_name} from {reviewer_name}")
+                     logging.error(f"{my_name()}: Invalid 'improvement_points' format for {reviewed_agent_name} from {reviewer_name}")
                 # --- End dictionary key access ---
                     
         for name, scores in score_table.items():
@@ -343,6 +354,8 @@ class AgentTeam:
                 avg_scores[name] = int(sum(scores) / len(scores))
             else:
                 avg_scores[name] = 0 # Assign 0 if no scores
+                logging.error(f"{my_name()}:scores are null")
+
 
         logging.info(f"\n{my_name()}: avg_scores: {avg_scores}")
 
@@ -353,7 +366,8 @@ class AgentTeam:
         # harmonize improvement points list:
         improvement_points = self._review_improvement_points(
             query = query, 
-            improvement_points = improvement_points_table[winner_name])
+            improvement_points = improvement_points_table[winner_name]
+            )
         
         return WinnerFormat(
             avg_score = winner_avg_score, 
@@ -421,7 +435,8 @@ class AgentTeam:
             logging.info(f"peer reviews done")
       
             winner = self.analize_peer_reviews(query = query, peer_reviews = peer_reviews)
-            # this field was returned empty
+            
+            # this field was returned empty; time to fill it in: 
             winner.response = responses.get(winner.name, "Error: Winner response not found" )    
             self.state.append(winner)
 
@@ -434,31 +449,64 @@ class AgentTeam:
 
 
 #====================================================================
+#------------------------------ MAIN() ------------------------------
+#====================================================================  
+def loop_with_human(query:str):
+
+    # Leader analyzes the query, invokes tools, questions the user if required, 
+    # and provides an updated prompt for agents. 
+    leader = LeaderAgent("openai:gpt-4o-mini")
+
+    # refine the query in a dialog with the user, using available tools if required:
+    query_type, query_class, prompt_for_agents, recommended_tools = leader.refine_query(query)
+    # in future, let the leader decide on llms and also use temperatures from the table. 
+
+    print(f"{my_name()} query_type: {query_type}, query_class: {query_class}")
+
+    team = AgentTeam()
+    team.initialize(leader_llm_name = "openai:gpt-4o-mini", 
+                        agent_llm_names = ["openai:gpt-4o-mini", "google_genai:gemini-2.0-flash", "deepseek:deepseek-chat"])
+    
+    while True:
+        # get the results from the agent team. Iterative review cycle is inside:  
+        winners = team.improvements_loop(
+                    query = prompt_for_agents, 
+                    tools = recommended_tools, 
+                    max_iterations = MAX_ITERATIONS)
+        
+        # print out results: 
+        for iter, winner in enumerate(winners):
+            print(f"\n iteration {iter+1}: ")
+            print(f"Scores Table: {winner.scores_table}")
+            print(f"Winner Name: {winner.name}")
+            print(f"Winner Avg Score: {winner.avg_score}")
+            print(f"Winner response:{winner.response}")
+
+        # ask for other agents feebdack on the results. We will leave it for later:
+        # agent_feedback = leader.get_agents_feedback(winners[-1])
+        
+        # Leader asks for the human feebdack on the results.
+        human_decision, prompt_for_agents = leader.get_human_feedback(winners[-1])
+        logging.info(f"{my_name()} human_decision: {human_decision}, ")
+
+        if human_decision == ActionChoiceEnum.DONE:
+            return winners          # the current pipeline can continue 
+        elif human_decision == ActionChoiceEnum.CONTINUE:
+            # prompt_for_agents has already been updated, repeat the whole cycle anew 
+            continue
+        elif human_decision == ActionChoiceEnum.STOP:
+            # stop the execution alltogether - this is an emergency :) 
+            return None 
+        else:
+            logging.error(f"{my_name()} invalid response from 'get_human_feedback()': {human_decision}")
+            return None   
+
+
+
+#====================================================================
 #---------------------------- __MAIN__ -----------------------------
 #====================================================================
 if __name__ == "__main__":
-    # Test instantiation
-    
-    # query = "Plan a weekend trip for me next month, considering weather, budget, and some fun activities, but I’m not sure where to go yet."
-    query = QUERY_TYPES["OTHER"]["test_query"][1]
 
-    # leader = LeaderAgent("openai:gpt-4o-mini")
-    team = AgentTeam()
-    team.initialize(leader_llm_name = "openai:gpt-4o-mini", 
-                         agent_llm_names = ["openai:gpt-4o-mini", "google_genai:gemini-2.0-flash", "deepseek:deepseek-chat"])
- 
-    prompt = query 
-    recommended_tools = []
-    winners = team.improvements_loop(query = prompt, 
-                        tools = recommended_tools, 
-                        max_iterations = MAX_ITERATIONS)
-    iter = 1
-    for winner in winners:
-        print(f"\n iteration {iter}: ")
-        print(f"Winner Name: {winner.name}")
-        # print(f"Winner Response: {winner.response}")
-        print(f"Winner Avg Score: {winner.avg_score}")
-        print(f"Winner response:{winner.response}")
-        iter += 1
-
-
+    query = QUERY_TYPES["SOFTWARE_PROGRAMMING"]["test_query"]
+    loop_with_human(query)    

@@ -6,7 +6,7 @@
 #===============================================================================================================================
 
 USE_REAL_THREADS = True             # controls threading model; if False, uses Python asyncio threads 
-MAX_ITERATIONS = 2                  # max number of self improving iterations 
+MAX_ITERATIONS = 1                  # max number of self improving iterations 
 
 import logging
 import inspect  # Added for my_name lambda
@@ -14,6 +14,8 @@ from langchain.chat_models import init_chat_model
 from pydantic import BaseModel, RootModel, ValidationError, Field  
 import asyncio
 from typing import Type, List, Dict, Optional, Tuple, Union, Any
+from enum import Enum
+
 
 
 AVAILABLE_LEADER_LLMS = [
@@ -158,13 +160,13 @@ class SimpleResponseFormat(RootModel[dict[str, str]]):
 #-----------------------------------------------------------------------------------------------------------------------
 
 # response from query_analysis
-class QueryAnalysisResponseFormat_1(BaseModel):
+class QueryAnalysisResponseFormat(BaseModel):
     query_type: str = Field(..., description="Type of the query")
     query_class: str = Field(..., description="Class of the query")
     improved_query: str = Field(..., description="Improved version of the query")
     
 
-class QueryAnalysisResponseFormat_2(BaseModel):
+class ToolsRecommendationsFormat(BaseModel):
     prompt_for_agents: str = Field(..., description="Prompt for agents")
     recommended_tools: Optional[List[str]] = Field(None, description="Names of tools to be used by agents")
 
@@ -175,17 +177,28 @@ class WinnerFormat(BaseModel):
     improvement_points: List[str] = Field(..., description="Winner's agent improvement points")
     scores_table: Dict[str, int] = Field(..., description= "Table of average scores per each agent")
 
-#--------------------------------------------------------------------------------------------------------------------------
+#----------------------------------------------------------------------------------------------------
 
 # internal class
 class InnerPeerReviewFormat(BaseModel):
     improvement_points: List[str]
     score: int 
 
-
+# {reviewed_agent: {"score": int, "improvement_points" : [improvement_point]} }
 class PeerReviewResponseFormat(RootModel[dict[str, InnerPeerReviewFormat]]):
     pass
 #------------------------------------------------------------------------------------------------------
+
+class ActionChoiceEnum(str, Enum):
+    DONE = "done"
+    STOP = "stop"
+    CONTINUE = "continue"
+    
+
+class HumanFeedbackFormat(BaseModel):
+    action: ActionChoiceEnum = Field(..., description="Action to be taken")
+    new_prompt: str = Field(None, description="New prompt for agents")
+    
 
 # plain list of strings for improvement points: 
 # class ImprovementPointsFormat(RootModel):
